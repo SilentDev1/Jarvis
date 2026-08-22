@@ -1,0 +1,82 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
+    jarvis_host: str = "127.0.0.1"
+    jarvis_port: int = 8765
+    jarvis_admin_token: str = Field("change-this-to-a-long-random-value", min_length=12)
+    data_dir: Path = Path("./data")
+    log_dir: Path = Path("./logs")
+    camera_mode: str = "test"
+    camera_name: str = "Tapo C101"
+    camera_host: str = ""
+    camera_username: str = ""
+    camera_password: str = ""
+    camera_rtsp_url_main: str = ""
+    camera_rtsp_url_sub: str = ""
+    vision_provider: str = "mock"
+    vision_model: str = "yolo11n.pt"
+    detection_confidence: float = Field(0.5, ge=0.1, le=1)
+    detection_fps: float = Field(3, ge=0.2, le=30)
+    voice_satellite: str = "simulator"
+    ai_provider: str = "ollama"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3.5:4b"
+    dwell_seconds: float = Field(2.5, ge=0.2, le=30)
+    disappear_grace_seconds: float = Field(4, ge=0, le=30)
+    greeting_cooldown_seconds: float = Field(60, ge=0, le=3600)
+    session_timeout_seconds: float = Field(300, ge=10, le=3600)
+    zone_observation: str = "0.02,0.05;0.98,0.05;0.98,0.98;0.02,0.98"
+    zone_approach: str = "0.15,0.25;0.85,0.25;0.90,0.98;0.10,0.98"
+    zone_interaction: str = "0.28,0.48;0.72,0.48;0.82,0.98;0.18,0.98"
+    store_transcripts: bool = True
+    store_visitor_images: bool = True
+    store_badge_images: bool = True
+    record_audio: bool = False
+    face_recognition: bool = False
+    media_retention_days: int = Field(30, ge=1, le=3650)
+    notification_provider: str = "log"
+    ha_mqtt_enabled: bool = False
+
+    @field_validator("camera_mode")
+    @classmethod
+    def camera_mode_ok(cls, v):
+        if v not in {"live", "test"}:
+            raise ValueError("CAMERA_MODE must be live or test")
+        return v
+
+    @field_validator("data_dir", "log_dir")
+    @classmethod
+    def portable_path(cls, v):
+        v = Path(v)
+        return v if v.is_absolute() else ROOT / v
+
+    def rtsp_url(self, main=False):
+        explicit = self.camera_rtsp_url_main if main else self.camera_rtsp_url_sub
+        if explicit:
+            return explicit
+        if not all((self.camera_host, self.camera_username, self.camera_password)):
+            return ""
+        from urllib.parse import quote
+
+        return f"rtsp://{quote(self.camera_username, safe='')}:{quote(self.camera_password, safe='')}@{self.camera_host}:554/{'stream1' if main else 'stream2'}"
+
+    def public(self):
+        d = self.model_dump(mode="json")
+        for k in ("camera_password", "jarvis_admin_token"):
+            d[k] = "***" if d[k] else ""
+        for k in ("camera_rtsp_url_main", "camera_rtsp_url_sub"):
+            d[k] = "rtsp://***" if d[k] else ""
+        return d
+
+
+@lru_cache
+def get_settings():
+    return Settings()
