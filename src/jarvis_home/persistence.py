@@ -51,6 +51,8 @@ class Badge(Base):
     session_id: Mapped[str] = mapped_column(String)
     image_path: Mapped[str] = mapped_column(String)
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name_candidate: Mapped[str | None] = mapped_column(String, nullable=True)
+    company_candidate: Mapped[str | None] = mapped_column(String, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=0)
     timestamp: Mapped[str] = mapped_column(String)
 
@@ -126,7 +128,23 @@ class Store:
 
     def init(self):
         Base.metadata.create_all(self.engine)
+        self._migrate_badge_evidence()
         self.seed_devices()
+
+    def _migrate_badge_evidence(self):
+        """Small idempotent migration for installations created before live OCR."""
+        with self.engine.begin() as connection:
+            existing = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(badges)"
+                ).fetchall()
+            }
+            for column in ("name_candidate", "company_candidate"):
+                if column not in existing:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE badges ADD COLUMN {column} VARCHAR"
+                    )
 
     def seed_devices(self):
         with self.Session() as s:

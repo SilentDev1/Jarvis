@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import logging.handlers
@@ -9,12 +10,13 @@ from pathlib import Path
 
 import psutil
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from .config import get_settings
 from .core.events import EventBus
+from .core.notifications import format_visitor_notification
 from .core.security import sanitize
 from .integrations.providers import (
     LogNotification,
@@ -30,11 +32,21 @@ from .modules.front_door.conversation import (
     ConversationState,
     apply_result,
     deterministic_reply,
+    enforce_policy,
+)
+from .modules.front_door.media import (
+    capture_burst,
+    run_ocr,
+    save_jpeg,
+    select_sharpest,
 )
 from .modules.front_door.state import VisitorStateMachine
+from .modules.front_door.zones import classify, parse_polygon
 from .persistence import (
+    Badge,
     ConversationTurn,
     Device,
+    Image,
     Store,
     VisitorSession,
     utcnow,
@@ -68,6 +80,40 @@ voice = SimulatorVoice()
 notifier = LogNotification(bus)
 sessions: dict[str, ConversationState] = {}
 started = time.time()
+metrics = {
+    "frames": 0,
+    "detections": 0,
+    "vision_fps": 0.0,
+    "detection_latency_ms": 0.0,
+    "last_detection": None,
+    "loop_status": "starting",
+}
+zone_path = Path(cfg.data_dir) / "zones.json"
+
+
+def default_zones():
+    return {
+        "observation": parse_polygon(cfg.zone_observation),
+        "approach": parse_polygon(cfg.zone_approach),
+        "interaction": parse_polygon(cfg.zone_interaction),
+    }
+
+
+def load_zones():
+    if zone_path.exists():
+        try:
+            data = json.loads(zone_path.read_text())
+            return {
+                name: [tuple(point) for point in data[name]] for name in default_zones()
+            }
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            logger.warning(
+                "Invalid saved zone configuration; using environment defaults"
+            )
+    return default_zones()
+
+
+zones = load_zones()
 
 
 def setup_logging():
@@ -108,12 +154,216 @@ class ZoneEvent(BaseModel):
     now: float | None = None
 
 
+class ZoneConfiguration(BaseModel):
+    observation: list[tuple[float, float]] = Field(min_length=3, max_length=12)
+    approach: list[tuple[float, float]] = Field(min_length=3, max_length=12)
+    interaction: list[tuple[float, float]] = Field(min_length=3, max_length=12)
+
+
+async def create_visitor_session(sid: str):
+    if sid in sessions:
+        return sessions[sid]
+    state = ConversationState(sid)
+    sessions[sid] = state
+    greeting = "Hello. How can I help you?"
+    state.turns.append({"role": "assistant", "content": greeting})
+    await voice.speak(greeting)
+    with store.Session() as s:
+        if not s.get(VisitorSession, sid):
+            s.add(VisitorSession(id=sid, arrival_time=utcnow(), status="active"))
+        s.add(
+            ConversationTurn(
+                session_id=sid, role="assistant", text=greeting, timestamp=utcnow()
+            )
+        )
+        s.commit()
+    bus.publish("visitor.session_started", {"session_id": sid})
+    bus.publish("jarvis.greeting", {"session_id": sid, "text": greeting})
+    asyncio.create_task(capture_visitor_photo(sid))
+    return state
+
+
+async def capture_visitor_photo(sid: str):
+    frame = await camera.snapshot(high_quality=True)
+    if frame is None or frame.data is None:
+        bus.publish(
+            "system.warning",
+            {"component": "visitor_photo", "reason": "snapshot unavailable"},
+        )
+        return None
+    path = cfg.data_dir / "media" / sid / "visitor_full.jpg"
+    try:
+        save_jpeg(frame.data, path)
+        with store.Session() as s:
+            db = s.get(VisitorSession, sid)
+            if db:
+                db.visitor_photo = str(path.relative_to(cfg.data_dir))
+            s.add(
+                Image(
+                    session_id=sid,
+                    kind="visitor_full",
+                    path=str(path.relative_to(cfg.data_dir)),
+                    timestamp=utcnow(),
+                )
+            )
+            s.commit()
+        bus.publish(
+            "visitor.photo_captured",
+            {"session_id": sid, "path": str(path.relative_to(cfg.data_dir))},
+        )
+        return path
+    except (OSError, ValueError):
+        logger.exception("Visitor snapshot failed")
+        return None
+
+
+async def capture_badge(sid: str):
+    frames = await capture_burst(camera, seconds=3.0)
+    image, quality = select_sharpest(frames)
+    if image is None:
+        bus.publish(
+            "system.warning",
+            {"component": "badge", "reason": "no decodable main-stream frames"},
+        )
+        return
+    path = cfg.data_dir / "media" / sid / "badge_best.jpg"
+    save_jpeg(image, path)
+    try:
+        result = await run_ocr(image)
+    except (ImportError, RuntimeError, OSError):
+        logger.exception("Badge OCR failed")
+        result = None
+    with store.Session() as s:
+        db = s.get(VisitorSession, sid)
+        if db:
+            db.badge_photo = str(path.relative_to(cfg.data_dir))
+            db.badge_ocr = result.text if result else None
+        s.add(
+            Badge(
+                session_id=sid,
+                image_path=str(path.relative_to(cfg.data_dir)),
+                ocr_text=result.text if result else None,
+                confidence=result.confidence if result else 0,
+                name_candidate=result.name_candidate if result else None,
+                company_candidate=result.company_candidate if result else None,
+                timestamp=utcnow(),
+            )
+        )
+        s.commit()
+    bus.publish(
+        "visitor.badge_captured",
+        {
+            "session_id": sid,
+            "path": str(path.relative_to(cfg.data_dir)),
+            "sharpness": round(quality, 1),
+            "ocr_text": result.text if result else "",
+            "ocr_confidence": round(result.confidence, 1) if result else 0,
+            "evidence_only": True,
+        },
+    )
+
+
+async def live_vision_loop():
+    window_started = time.monotonic()
+    window_inferences = 0
+    last_inference = 0.0
+    previous_zone = None
+    previous_present = False
+    metrics["loop_status"] = "running"
+    try:
+        async for frame in camera.frames():
+            metrics["frames"] += 1
+            now = time.monotonic()
+            if now - last_inference < 1 / cfg.detection_fps:
+                continue
+            last_inference = now
+            t0 = time.perf_counter()
+            detections = await vision.detect(frame)
+            window_inferences += 1
+            metrics["detection_latency_ms"] = round(
+                (time.perf_counter() - t0) * 1000, 1
+            )
+            if cfg.camera_mode == "test":
+                elapsed = time.monotonic() - window_started
+                if elapsed >= 5:
+                    metrics["vision_fps"] = round(window_inferences / elapsed, 2)
+                    window_started = time.monotonic()
+                    window_inferences = 0
+                continue
+            people = [item for item in detections if item.label == "person"]
+            zone = (
+                classify(max(people, key=lambda item: item.confidence).box, zones)
+                if people
+                else None
+            )
+            transition = machine.update(zone, time.monotonic())
+            if people:
+                metrics["detections"] += 1
+                metrics["last_detection"] = time.time()
+                if not previous_present:
+                    bus.publish("person.detected", {"count": len(people), "zone": zone})
+                if zone != previous_zone:
+                    bus.publish("person.entered_zone", {"zone": zone})
+            previous_present = bool(people)
+            previous_zone = zone
+            if transition.event:
+                bus.publish(transition.event, {"session_id": transition.session_id})
+                if (
+                    transition.event == "visitor.session_started"
+                    and transition.session_id
+                ):
+                    await create_visitor_session(transition.session_id)
+                elif (
+                    transition.event in {"visitor.departed", "session.timeout"}
+                    and transition.session_id in sessions
+                ):
+                    await complete_session(transition.session_id)
+            elapsed = time.monotonic() - window_started
+            if elapsed >= 5:
+                metrics["vision_fps"] = round(window_inferences / elapsed, 2)
+                window_started = time.monotonic()
+                window_inferences = 0
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        metrics["loop_status"] = "error"
+        logger.exception("Live vision loop stopped")
+        bus.publish("system.error", {"component": "vision_loop"})
+
+
+async def complete_session(sid: str):
+    state = sessions.pop(sid, None)
+    if not state:
+        return
+    state.status = "complete"
+    with store.Session() as s:
+        db = s.get(VisitorSession, sid)
+        if db:
+            db.status = "complete"
+            db.departure_time = utcnow()
+            db.conversation_summary = (
+                f"{state.visitor_type}: {state.reason or 'reason not provided'}"
+            )
+        badge = s.scalar(select(Badge).where(Badge.session_id == sid).limit(1))
+        s.commit()
+        if db:
+            await notifier.send(
+                "Visitor at Front Door",
+                format_visitor_notification(db, bool(badge)),
+                db.visitor_photo,
+            )
+    bus.publish("session.completed", {"session_id": sid})
+
+
 @asynccontextmanager
 async def lifespan(app):
     setup_logging()
     store.init()
     bus.publish("system.started", {"version": "0.1.0"})
+    vision_task = asyncio.create_task(live_vision_loop())
     yield
+    vision_task.cancel()
+    await asyncio.gather(vision_task, return_exceptions=True)
     bus.publish("system.stopped")
 
 
@@ -138,7 +388,7 @@ async def health():
 
 @app.get("/health/camera")
 async def health_camera():
-    return camera.health()
+    return {**camera.health(), "vision": metrics}
 
 
 @app.get("/health/ai")
@@ -225,6 +475,8 @@ async def front_door():
         "camera": camera.health(),
         "vision_provider": type(vision).__name__,
         "voice": voice.health(),
+        "vision": metrics,
+        "zones": zones,
         "active_session": sessions.get(machine.session_id).public()
         if machine.session_id in sessions
         else None,
@@ -239,23 +491,7 @@ async def sim_start():
     sid = t.session_id or machine.session_id
     if not sid:
         raise HTTPException(409, "Cooldown active")
-    state = ConversationState(sid)
-    sessions[sid] = state
-    state.turns.append({"role": "assistant", "content": "Hello. How can I help you?"})
-    await voice.speak(state.turns[-1]["content"])
-    with store.Session() as s:
-        s.add(VisitorSession(id=sid, arrival_time=utcnow(), status="active"))
-        s.add(
-            ConversationTurn(
-                session_id=sid,
-                role="assistant",
-                text=state.turns[-1]["content"],
-                timestamp=utcnow(),
-            )
-        )
-        s.commit()
-    bus.publish("visitor.session_started", {"session_id": sid})
-    bus.publish("jarvis.greeting", {"session_id": sid})
+    state = await create_visitor_session(sid)
     return {
         "session_id": sid,
         "reply": state.turns[-1]["content"],
@@ -278,6 +514,7 @@ async def sim_say(sid: str, item: VisitorInput):
     except Exception:  # noqa: BLE001 - deterministic fallback is the resilience boundary
         result = deterministic_reply(state, text)
         provider = "safe_fallback"
+    result = enforce_policy(state, text, result)
     result = apply_result(state, result)
     reply = sanitize(
         result.get(
@@ -290,6 +527,7 @@ async def sim_say(sid: str, item: VisitorInput):
     if result["action"] == "request_badge":
         machine.request_badge()
         bus.publish("visitor.badge_requested", {"session_id": sid})
+        asyncio.create_task(capture_badge(sid))
     if result["action"] in {"notify_homeowner", "mark_delivery"}:
         await notifier.send(
             "Visitor at Front Door",
@@ -324,22 +562,58 @@ async def sim_say(sid: str, item: VisitorInput):
 
 @app.post("/api/simulator/{sid}/end", dependencies=[Depends(auth)])
 async def sim_end(sid: str):
-    state = sessions.pop(sid, None)
-    if not state:
+    if sid not in sessions:
         raise HTTPException(404, "No active visitor session")
     machine.complete(time.monotonic())
-    state.status = "complete"
-    with store.Session() as s:
-        db = s.get(VisitorSession, sid)
-        db.status = "complete"
-        db.departure_time = utcnow()
-        db.conversation_summary = (
-            f"{state.visitor_type}: {state.reason or 'reason not provided'}"
-        )
-        s.commit()
+    await complete_session(sid)
     bus.publish("visitor.departed", {"session_id": sid})
     bus.publish("session.completed", {"session_id": sid})
     return {"status": "complete"}
+
+
+@app.get("/api/front-door/preview.jpg")
+async def camera_preview():
+    image = getattr(camera, "last_image", None)
+    if image is None:
+        frame = await camera.snapshot(high_quality=False)
+        image = frame.data if frame is not None else None
+    if image is None:
+        raise HTTPException(503, "Camera frame unavailable")
+    import cv2
+
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        raise HTTPException(500, "Frame encoding failed")
+    return Response(
+        encoded.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/front-door/zones")
+async def get_zone_configuration():
+    return zones
+
+
+@app.put("/api/front-door/zones", dependencies=[Depends(auth)])
+async def save_zone_configuration(item: ZoneConfiguration):
+    global zones
+    data = item.model_dump()
+    if any(
+        not 0 <= value <= 1
+        for polygon in data.values()
+        for point in polygon
+        for value in point
+    ):
+        raise HTTPException(422, "Zone coordinates must be normalized from 0 to 1")
+    zones = {
+        name: [tuple(point) for point in polygon] for name, polygon in data.items()
+    }
+    zone_path.parent.mkdir(parents=True, exist_ok=True)
+    zone_path.write_text(json.dumps(data, indent=2))
+    bus.publish("front_door.zones_updated", {"path": str(zone_path)})
+    return zones
 
 
 @app.post("/api/test/zone", dependencies=[Depends(auth)])

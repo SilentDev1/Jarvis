@@ -10,3 +10,4 @@
 
 No application source or hard-coded user path changes are required. SQLite is suitable for one core instance; adopt PostgreSQL before active-active deployment.
 
+YOLO/OpenCV/Tesseract and Ollama are provider dependencies, not Core assumptions. On Linux, install them natively or in service containers, mount the same data paths, and retain identical provider configuration. Do not migrate architecture-specific model caches blindly; pull compatible models on the destination.

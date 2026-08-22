@@ -22,7 +22,9 @@ Current recommended M4/16 GB configuration is Ollama with `qwen3.5:4b`, Tapo sub
 
 ## Live Tapo mode
 
-Enable a Tapo camera account/RTSP credentials in the Tapo app, copy `.env.example` to `.env`, set `CAMERA_MODE=live`, host/user/password, `VISION_PROVIDER=yolo`, then install `.[vision]`. Jarvis constructs `stream1`/`stream2` URLs unless explicit URLs are supplied. Credentials are masked and excluded from Git. See [Tapo setup](docs/TAPO_SETUP.md).
+Enable a Tapo camera account/RTSP credentials in the Tapo app, then run `./scripts/configure-tapo.sh` and `./scripts/test-camera.sh`. The helper stores the hidden password only in excluded `.env`. Jarvis accepts host/user/password and constructs `stream1`/`stream2`, or accepts explicit main/sub URLs instead. Use the dashboard camera canvas to draw and save normalized zones. See [Tapo setup](docs/TAPO_SETUP.md) and the [live test procedure](docs/LIVE_FRONT_DOOR_TEST.md).
+
+Live dependencies are ffmpeg 9.0.1, Tesseract 5.5.3, OpenCV, Ultralytics/YOLO11n, and Ollama `qwen3.5:4b`. `start.sh` starts Ollama only when its API is absent; it never starts a duplicate service. AiPi remains simulated.
 
 ## Privacy and security defaults
 
@@ -35,4 +37,3 @@ Mac native mode is best for present hardware acceleration. Docker/Linux deployme
 ## Commands
 
 `setup.sh`, `start.sh`, `stop.sh`, `restart.sh`, `status.sh`, `test.sh`, `doctor.sh`, and `backup.sh` live in `scripts/`. Logs rotate in `logs/jarvis.log`; server output is `logs/server.log`.
-

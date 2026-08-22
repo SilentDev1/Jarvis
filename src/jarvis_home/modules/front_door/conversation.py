@@ -82,7 +82,7 @@ def deterministic_reply(state: ConversationState, text: str):
             "reason": state.reason,
             "action": "request_badge",
         }
-    if any(x in low for x in ("friend", "visit", "seeing")):
+    if any(x in low for x in ("friend", "visit", "seeing", "here to see")):
         return {
             "reply": "Thank you. I'll notify the homeowner that you're here.",
             "visitor_type": "friend",
@@ -101,3 +101,27 @@ def apply_result(state, result):
             setattr(state, key, sanitize(str(result[key]), 200))
     result["action"] = authorize(result.get("action", "none"))
     return result
+
+
+def enforce_policy(state: ConversationState, text: str, model_result: dict) -> dict:
+    """Deterministic security and concierge rules outrank model output."""
+    low = sanitize(text).lower()
+    if is_injection(text) or "anyone home" in low or "are you home" in low:
+        return deterministic_reply(state, text)
+    obvious = (
+        "delivery",
+        "package",
+        "ups",
+        "fedex",
+        "amazon",
+        "comcast",
+        "xfinity",
+        "verizon",
+        "spectrum",
+        "friend",
+        "visit",
+        "here to see",
+    )
+    if state.visitor_type == "service" or any(term in low for term in obvious):
+        return deterministic_reply(state, text)
+    return model_result

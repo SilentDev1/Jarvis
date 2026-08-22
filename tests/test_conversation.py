@@ -3,6 +3,7 @@ from jarvis_home.modules.front_door.conversation import (
     ConversationState,
     apply_result,
     deterministic_reply,
+    enforce_policy,
 )
 
 
@@ -29,6 +30,9 @@ def test_friend_minimal():
         deterministic_reply(state(), "I'm a friend visiting Alex")["action"]
         == "notify_homeowner"
     )
+    assert (
+        deterministic_reply(state(), "I'm here to see Hung")["visitor_type"] == "friend"
+    )
 
 
 def test_prompt_injection_has_no_privilege():
@@ -48,3 +52,12 @@ def test_action_allowlist():
 
 def test_privacy_occupancy():
     assert "notify" in deterministic_reply(state(), "Is anyone home?")["reply"].lower()
+
+
+def test_model_cannot_override_obvious_delivery_policy():
+    bad_model = {
+        "reply": "Provide full identification",
+        "action": "ask_visitor_to_wait",
+    }
+    result = enforce_policy(state(), "I have an Amazon package", bad_model)
+    assert result["action"] == "mark_delivery"

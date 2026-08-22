@@ -46,6 +46,9 @@ class TapoCamera(CameraProvider):
         self.connected = False
         self.reconnects = 0
         self.last_frame = None
+        self.last_image = None
+        self.frame_count = 0
+        self.stream_started = None
 
     async def frames(self):
         try:
@@ -56,11 +59,16 @@ class TapoCamera(CameraProvider):
         while True:
             cap = cv2.VideoCapture(self.sub_url, cv2.CAP_FFMPEG)
             self.connected = cap.isOpened()
+            if self.connected:
+                self.stream_started = time.time()
+                delay = 1
             while self.connected:
                 ok, img = await asyncio.to_thread(cap.read)
                 if not ok:
                     break
                 self.last_frame = time.time()
+                self.last_image = img
+                self.frame_count += 1
                 h, w = img.shape[:2]
                 yield Frame(img, self.last_frame, w, h)
             self.connected = False
@@ -89,6 +97,13 @@ class TapoCamera(CameraProvider):
             "connected": self.connected,
             "last_frame": self.last_frame,
             "reconnects": self.reconnects,
+            "stream_fps": round(
+                self.frame_count / max(time.time() - self.stream_started, 0.001), 2
+            )
+            if self.stream_started
+            else 0,
+            "main_configured": bool(self.main_url),
+            "sub_configured": bool(self.sub_url),
         }
 
 
@@ -164,6 +179,9 @@ class OllamaAI(AIProvider):
                     "model": self.model,
                     "stream": False,
                     "format": "json",
+                    "think": False,
+                    "keep_alive": "10m",
+                    "options": {"temperature": 0.1, "num_predict": 160},
                     "messages": [{"role": "system", "content": system}] + prompt,
                 },
             )

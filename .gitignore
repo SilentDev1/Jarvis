@@ -4,11 +4,13 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 data/*.db*
+data/zones.json
 data/media/*
 !data/media/.gitkeep
+data/models/
+*.pt
 logs/*
 !logs/.gitkeep
 run/
 backups/
 .DS_Store
-
