@@ -26,13 +26,21 @@ def test_contractor_flow():
 
 
 def test_friend_minimal():
+    unknown = deterministic_reply(state(), "I'm a friend visiting Alex")
+    assert unknown["action"] == "none" and "name" in unknown["reply"].lower()
     assert (
-        deterministic_reply(state(), "I'm a friend visiting Alex")["action"]
-        == "notify_homeowner"
+        deterministic_reply(state(), "I'm here to see Hung")["visitor_type"]
+        == "friend_family"
     )
-    assert (
-        deterministic_reply(state(), "I'm here to see Hung")["visitor_type"] == "friend"
-    )
+
+
+def test_name_and_company_are_collected_without_reasking_name():
+    s = state()
+    result = deterministic_reply(s, "I'm John Smith from Comcast")
+    assert result["visitor_name"] == "John Smith"
+    assert result["claimed_company"] == "Comcast"
+    assert "service" in result["reply"].lower()
+    assert "your name" not in result["reply"].lower()
 
 
 def test_prompt_injection_has_no_privilege():

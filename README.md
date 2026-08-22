@@ -26,9 +26,15 @@ Enable a Tapo camera account/RTSP credentials in the Tapo app, then run `./scrip
 
 Live dependencies are ffmpeg 9.0.1, Tesseract 5.5.3, OpenCV, Ultralytics/YOLO11n, and Ollama `qwen3.5:4b`. `start.sh` starts Ollama only when its API is absent; it never starts a duplicate service. AiPi remains simulated.
 
+## Known people and face recognition
+
+Run `./scripts/setup-face-recognition.sh` once to install OpenCV Zoo's local YuNet detector and SFace embedding model. In the dashboard, a homeowner can select **Remember** on a saved visitor photo, provide a name, and later disable or delete that person. The admin token protects enrollment, listing, changes, deletion, and the current-frame recognition test. Face templates are separate `.npy` files under excluded `data/faces/`; they are never uploaded or committed.
+
+Jarvis uses `KNOWN_HIGH_CONFIDENCE`, `POSSIBLE_MATCH`, `UNKNOWN`, and `INSUFFICIENT_FACE`. Only a high-confidence match may influence the greeting. Possible matches stay unnamed. Face matching is a convenience hint and can never authorize access, unlock a door, reveal occupancy, or bypass the action allowlist. Unknown visitors are never automatically enrolled.
+
 ## Privacy and security defaults
 
-Event snapshots and transcripts are enabled; raw audio and face recognition are disabled. Jarvis never unlocks doors or exposes household state. Speech/OCR are untrusted; tools are allowlisted and no shell tool exists. The server binds to localhost by default and mutating endpoints require `X-Jarvis-Token`.
+Event snapshots and transcripts are enabled; raw audio is disabled. The local face provider can be ready, but visitor matching remains dormant until a homeowner explicitly enrolls a person. Jarvis never unlocks doors or exposes household state. Speech/OCR are untrusted; tools are allowlisted and no shell tool exists. The server binds to localhost by default and mutating or biometric endpoints require `X-Jarvis-Token`.
 
 ## Deployment
 

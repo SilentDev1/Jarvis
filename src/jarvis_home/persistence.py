@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, String, Text, create_engine
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -25,6 +25,10 @@ class VisitorSession(Base):
     status: Mapped[str] = mapped_column(String, default="active")
     confidence: Mapped[float] = mapped_column(Float, default=0)
     notification_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    known_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recognized_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    recognition_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    face_match_status: Mapped[str] = mapped_column(String, default="UNKNOWN")
 
 
 class ConversationTurn(Base):
@@ -80,8 +84,13 @@ class KnownPerson(Base):
     __tablename__ = "known_people"
     id: Mapped[int] = mapped_column(primary_key=True)
     display_name: Mapped[str] = mapped_column(String)
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     face_data_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+    last_seen: Mapped[str | None] = mapped_column(String, nullable=True)
+    match_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Notification(Base):
@@ -129,6 +138,7 @@ class Store:
     def init(self):
         Base.metadata.create_all(self.engine)
         self._migrate_badge_evidence()
+        self._migrate_face_recognition()
         self.seed_devices()
 
     def _migrate_badge_evidence(self):
@@ -145,6 +155,41 @@ class Store:
                     connection.exec_driver_sql(
                         f"ALTER TABLE badges ADD COLUMN {column} VARCHAR"
                     )
+
+    def _migrate_face_recognition(self):
+        """Idempotently upgrade databases created before local face matching."""
+        additions = {
+            "visitor_sessions": {
+                "known_person_id": "INTEGER",
+                "recognized_name": "VARCHAR",
+                "recognition_confidence": "FLOAT",
+                "face_match_status": "VARCHAR DEFAULT 'UNKNOWN'",
+            },
+            "known_people": {
+                "source_session_id": "VARCHAR",
+                "category": "VARCHAR",
+                "created_at": "VARCHAR",
+                "last_seen": "VARCHAR",
+                "match_count": "INTEGER DEFAULT 0",
+            },
+        }
+        with self.engine.begin() as connection:
+            for table, columns in additions.items():
+                existing = {
+                    row[1]
+                    for row in connection.exec_driver_sql(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+                for column, kind in columns.items():
+                    if column not in existing:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {table} ADD COLUMN {column} {kind}"
+                        )
+            connection.exec_driver_sql(
+                "UPDATE known_people SET created_at = COALESCE(created_at, ?) ",
+                (utcnow(),),
+            )
 
     def seed_devices(self):
         with self.Session() as s:

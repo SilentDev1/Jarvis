@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import numpy as np
 import psutil
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response
@@ -40,13 +41,16 @@ from .modules.front_door.media import (
     save_jpeg,
     select_sharpest,
 )
+from .modules.front_door.recognition import OpenCVFaceRecognition
 from .modules.front_door.state import VisitorStateMachine
+from .modules.front_door.tracking import CentroidTracker
 from .modules.front_door.zones import classify, parse_polygon
 from .persistence import (
     Badge,
     ConversationTurn,
     Device,
     Image,
+    KnownPerson,
     Store,
     VisitorSession,
     utcnow,
@@ -78,7 +82,23 @@ except Exception:  # noqa: BLE001 - optional provider import/model failures must
 ai = OllamaAI(cfg.ollama_url, cfg.ollama_model)
 voice = SimulatorVoice()
 notifier = LogNotification(bus)
+try:
+    face_recognition = (
+        OpenCVFaceRecognition(
+            cfg.face_detection_model,
+            cfg.face_recognition_model,
+            cfg.face_recognition_threshold,
+            cfg.face_possible_threshold,
+        )
+        if cfg.face_recognition
+        else None
+    )
+except (FileNotFoundError, ImportError, AttributeError):
+    face_recognition = None
 sessions: dict[str, ConversationState] = {}
+tracker = CentroidTracker(
+    max_missed=max(3, round(cfg.disappear_grace_seconds * cfg.detection_fps))
+)
 started = time.time()
 metrics = {
     "frames": 0,
@@ -87,8 +107,11 @@ metrics = {
     "detection_latency_ms": 0.0,
     "last_detection": None,
     "loop_status": "starting",
+    "tracks": [],
+    "face_recognition_latency_ms": None,
 }
 zone_path = Path(cfg.data_dir) / "zones.json"
+zones_configured = zone_path.exists()
 
 
 def default_zones():
@@ -160,17 +183,130 @@ class ZoneConfiguration(BaseModel):
     interaction: list[tuple[float, float]] = Field(min_length=3, max_length=12)
 
 
+class KnownPersonEnrollment(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    session_id: str = Field(min_length=1, max_length=100)
+    category: str | None = Field(default=None, max_length=40)
+
+
+class KnownPersonUpdate(BaseModel):
+    enabled: bool
+
+
+def media_path(relative_path: str | None) -> Path | None:
+    if not relative_path:
+        return None
+    root = cfg.data_dir.resolve()
+    candidate = (root / relative_path).resolve()
+    return candidate if candidate.is_relative_to(root) else None
+
+
+async def recognize_visitor(sid: str, image) -> None:
+    if face_recognition is None:
+        return
+    with store.Session() as s:
+        people = s.scalars(
+            select(KnownPerson).where(KnownPerson.enabled.is_(True))
+        ).all()
+        candidates = []
+        for person in people:
+            path = media_path(person.face_data_path)
+            if path:
+                candidates.append((person.id, person.display_name, path))
+    if not candidates:
+        return
+    started_at = time.perf_counter()
+    embedding = await asyncio.to_thread(face_recognition.embedding, image)
+    metrics["face_recognition_latency_ms"] = round(
+        (time.perf_counter() - started_at) * 1000, 1
+    )
+    if embedding is None:
+        bus.publish(
+            "visitor.face_insufficient",
+            {
+                "session_id": sid,
+                "status": "INSUFFICIENT_FACE",
+                "face_count": face_recognition.last_face_count,
+            },
+        )
+        return
+    match = await asyncio.to_thread(face_recognition.match, embedding, candidates)
+    if match is None:
+        with store.Session() as s:
+            visit = s.get(VisitorSession, sid)
+            if visit:
+                visit.face_match_status = "UNKNOWN"
+                s.commit()
+        bus.publish("visitor.face_unknown", {"session_id": sid})
+        return
+    if match.status == "POSSIBLE_MATCH":
+        with store.Session() as s:
+            visit = s.get(VisitorSession, sid)
+            if visit:
+                visit.face_match_status = match.status
+                visit.recognition_confidence = match.confidence
+                s.commit()
+        bus.publish(
+            "visitor.face_possible_match",
+            {
+                "session_id": sid,
+                "confidence": round(match.confidence, 3),
+                "identity_hint_only": True,
+            },
+        )
+        return
+    with store.Session() as s:
+        visit = s.get(VisitorSession, sid)
+        person = s.get(KnownPerson, match.known_person_id)
+        if not visit or not person or not person.enabled:
+            return
+        visit.known_person_id = person.id
+        visit.recognized_name = person.display_name
+        visit.recognition_confidence = match.confidence
+        visit.face_match_status = match.status
+        person.last_seen = utcnow()
+        person.match_count = (person.match_count or 0) + 1
+        s.commit()
+    bus.publish(
+        "visitor.face_recognized",
+        {
+            "session_id": sid,
+            "known_person_id": match.known_person_id,
+            "display_name": match.display_name,
+            "confidence": round(match.confidence, 3),
+            "identity_hint_only": True,
+        },
+    )
+
+
 async def create_visitor_session(sid: str):
     if sid in sessions:
         return sessions[sid]
     state = ConversationState(sid)
     sessions[sid] = state
-    greeting = "Hello. How can I help you?"
-    state.turns.append({"role": "assistant", "content": greeting})
-    await voice.speak(greeting)
     with store.Session() as s:
         if not s.get(VisitorSession, sid):
             s.add(VisitorSession(id=sid, arrival_time=utcnow(), status="active"))
+        s.commit()
+    await capture_visitor_photo(sid)
+    with store.Session() as s:
+        visit = s.get(VisitorSession, sid)
+        recognized_name = (
+            visit.recognized_name
+            if visit and visit.face_match_status == "KNOWN_HIGH_CONFIDENCE"
+            else None
+        )
+        if recognized_name:
+            state.known_person_name = recognized_name
+            state.face_match_status = "KNOWN_HIGH_CONFIDENCE"
+    greeting = (
+        f"Hi {recognized_name}. How can I help you?"
+        if recognized_name
+        else "Hello. How can I help you?"
+    )
+    state.turns.append({"role": "assistant", "content": greeting})
+    await voice.speak(greeting)
+    with store.Session() as s:
         s.add(
             ConversationTurn(
                 session_id=sid, role="assistant", text=greeting, timestamp=utcnow()
@@ -179,7 +315,6 @@ async def create_visitor_session(sid: str):
         s.commit()
     bus.publish("visitor.session_started", {"session_id": sid})
     bus.publish("jarvis.greeting", {"session_id": sid, "text": greeting})
-    asyncio.create_task(capture_visitor_photo(sid))
     return state
 
 
@@ -194,6 +329,18 @@ async def capture_visitor_photo(sid: str):
     path = cfg.data_dir / "media" / sid / "visitor_full.jpg"
     try:
         save_jpeg(frame.data, path)
+        crop_path = None
+        tracks = metrics.get("tracks") or []
+        if tracks:
+            x1, y1, x2, y2 = tracks[0]["box"]
+            height, width = frame.data.shape[:2]
+            crop = frame.data[
+                max(0, int(y1 * height)) : min(height, int(y2 * height)),
+                max(0, int(x1 * width)) : min(width, int(x2 * width)),
+            ]
+            if crop.size:
+                crop_path = cfg.data_dir / "media" / sid / "visitor_crop.jpg"
+                save_jpeg(crop, crop_path)
         with store.Session() as s:
             db = s.get(VisitorSession, sid)
             if db:
@@ -206,11 +353,21 @@ async def capture_visitor_photo(sid: str):
                     timestamp=utcnow(),
                 )
             )
+            if crop_path:
+                s.add(
+                    Image(
+                        session_id=sid,
+                        kind="visitor_crop",
+                        path=str(crop_path.relative_to(cfg.data_dir)),
+                        timestamp=utcnow(),
+                    )
+                )
             s.commit()
         bus.publish(
             "visitor.photo_captured",
             {"session_id": sid, "path": str(path.relative_to(cfg.data_dir))},
         )
+        await recognize_visitor(sid, frame.data)
         return path
     except (OSError, ValueError):
         logger.exception("Visitor snapshot failed")
@@ -279,6 +436,7 @@ async def live_vision_loop():
             last_inference = now
             t0 = time.perf_counter()
             detections = await vision.detect(frame)
+            detections = tracker.update(detections)
             window_inferences += 1
             metrics["detection_latency_ms"] = round(
                 (time.perf_counter() - t0) * 1000, 1
@@ -291,12 +449,22 @@ async def live_vision_loop():
                     window_inferences = 0
                 continue
             people = [item for item in detections if item.label == "person"]
+            metrics["tracks"] = [
+                {
+                    "id": item.track_id,
+                    "box": item.box,
+                    "confidence": round(item.confidence, 3),
+                }
+                for item in people
+            ]
             zone = (
                 classify(max(people, key=lambda item: item.confidence).box, zones)
                 if people
                 else None
             )
-            transition = machine.update(zone, time.monotonic())
+            transition = machine.update(
+                zone if zones_configured else None, time.monotonic()
+            )
             if people:
                 metrics["detections"] += 1
                 metrics["last_detection"] = time.time()
@@ -417,6 +585,11 @@ async def health_devices():
         "camera": camera.health(),
         "voice": voice.health(),
         "aipi": "waiting_for_hardware",
+        "face_recognition": {
+            "enabled": cfg.face_recognition,
+            "ready": face_recognition is not None,
+            "mode": "local_identity_hint",
+        },
     }
 
 
@@ -467,6 +640,148 @@ async def visitors():
         ]
 
 
+@app.get("/api/known-people", dependencies=[Depends(auth)])
+async def known_people():
+    with store.Session() as s:
+        return [
+            {
+                "id": person.id,
+                "display_name": person.display_name,
+                "category": person.category,
+                "enabled": person.enabled,
+                "source_session_id": person.source_session_id,
+                "created_at": person.created_at,
+                "last_seen": person.last_seen,
+                "match_count": person.match_count,
+            }
+            for person in s.scalars(
+                select(KnownPerson).order_by(KnownPerson.display_name)
+            ).all()
+        ]
+
+
+@app.post("/api/known-people", dependencies=[Depends(auth)])
+async def enroll_known_person(item: KnownPersonEnrollment):
+    if face_recognition is None:
+        raise HTTPException(503, "Local face recognition is not ready")
+    display_name = sanitize(item.display_name, 80).strip()
+    if not display_name:
+        raise HTTPException(422, "Display name is required")
+    with store.Session() as s:
+        visit = s.get(VisitorSession, item.session_id)
+        photo = media_path(visit.visitor_photo if visit else None)
+    if photo is None or not photo.is_file():
+        raise HTTPException(404, "Visitor photo not found")
+    import cv2
+
+    image = await asyncio.to_thread(cv2.imread, str(photo))
+    if image is None:
+        raise HTTPException(422, "Visitor photo could not be decoded")
+    embedding = await asyncio.to_thread(face_recognition.embedding, image)
+    if embedding is None:
+        raise HTTPException(422, "No clear face found in this visitor photo")
+    with store.Session() as s:
+        person = KnownPerson(
+            display_name=display_name,
+            category=sanitize(item.category, 40) if item.category else None,
+            enabled=True,
+            source_session_id=item.session_id,
+            created_at=utcnow(),
+            match_count=0,
+        )
+        s.add(person)
+        s.flush()
+        relative = Path("faces") / f"person_{person.id}.npy"
+        await asyncio.to_thread(
+            face_recognition.save_embedding, embedding, cfg.data_dir / relative
+        )
+        person.face_data_path = str(relative)
+        s.commit()
+        person_id = person.id
+    bus.publish(
+        "known_person.enrolled",
+        {"known_person_id": person_id, "display_name": display_name},
+    )
+    return {"id": person_id, "display_name": display_name, "status": "enrolled"}
+
+
+@app.patch("/api/known-people/{person_id}", dependencies=[Depends(auth)])
+async def update_known_person(person_id: int, item: KnownPersonUpdate):
+    with store.Session() as s:
+        person = s.get(KnownPerson, person_id)
+        if person is None:
+            raise HTTPException(404, "Known person not found")
+        person.enabled = item.enabled
+        s.commit()
+    bus.publish(
+        "known_person.updated",
+        {"known_person_id": person_id, "enabled": item.enabled},
+    )
+    return {"id": person_id, "enabled": item.enabled}
+
+
+@app.post("/api/face-recognition/test-current", dependencies=[Depends(auth)])
+async def test_current_face():
+    """Test the current frame without enrolling or retaining a new biometric."""
+    if face_recognition is None:
+        raise HTTPException(503, "Local face recognition is not ready")
+    frame = await camera.snapshot(high_quality=True)
+    if frame is None or frame.data is None:
+        raise HTTPException(503, "Camera frame unavailable")
+    started_at = time.perf_counter()
+    embedding = await asyncio.to_thread(face_recognition.embedding, frame.data)
+    detect_ms = round((time.perf_counter() - started_at) * 1000, 1)
+    if embedding is None:
+        return {
+            "face_detected": False,
+            "face_count": face_recognition.last_face_count,
+            "decision": "INSUFFICIENT_FACE",
+            "latency_ms": detect_ms,
+            "retained": False,
+        }
+    with store.Session() as s:
+        people = s.scalars(
+            select(KnownPerson).where(KnownPerson.enabled.is_(True))
+        ).all()
+        candidates = [
+            (person.id, person.display_name, path)
+            for person in people
+            if (path := media_path(person.face_data_path)) is not None
+        ]
+    match = await asyncio.to_thread(face_recognition.match, embedding, candidates)
+    return {
+        "face_detected": True,
+        "face_count": face_recognition.last_face_count,
+        "best_match": match.display_name if match else None,
+        "confidence": round(match.confidence, 3) if match else None,
+        "decision": match.status if match else "UNKNOWN",
+        "latency_ms": detect_ms,
+        "retained": False,
+    }
+
+
+@app.delete("/api/known-people/{person_id}", dependencies=[Depends(auth)])
+async def delete_known_person(person_id: int):
+    with store.Session() as s:
+        person = s.get(KnownPerson, person_id)
+        if person is None:
+            raise HTTPException(404, "Known person not found")
+        embedding_path = media_path(person.face_data_path)
+        for visit in s.scalars(
+            select(VisitorSession).where(VisitorSession.known_person_id == person_id)
+        ).all():
+            visit.known_person_id = None
+            visit.recognized_name = None
+            visit.recognition_confidence = None
+        name = person.display_name
+        s.delete(person)
+        s.commit()
+    if embedding_path and embedding_path.is_file():
+        embedding_path.unlink()
+    bus.publish("known_person.deleted", {"known_person_id": person_id})
+    return {"id": person_id, "display_name": name, "status": "deleted"}
+
+
 @app.get("/api/front-door")
 async def front_door():
     return {
@@ -477,6 +792,12 @@ async def front_door():
         "voice": voice.health(),
         "vision": metrics,
         "zones": zones,
+        "zones_configured": zones_configured,
+        "face_recognition": {
+            "enabled": cfg.face_recognition,
+            "ready": face_recognition is not None,
+            "mode": "local_identity_hint",
+        },
         "active_session": sessions.get(machine.session_id).public()
         if machine.session_id in sessions
         else None,
@@ -581,6 +902,59 @@ async def camera_preview():
         raise HTTPException(503, "Camera frame unavailable")
     import cv2
 
+    image = image.copy()
+    height, width = image.shape[:2]
+    colors = {
+        "observation": (255, 200, 92),
+        "approach": (97, 191, 245),
+        "interaction": (170, 230, 101),
+    }
+    for name, polygon in zones.items():
+        points = np.array([(round(x * width), round(y * height)) for x, y in polygon])
+        cv2.polylines(image, [points], True, colors[name], 2)
+        if len(points):
+            cv2.putText(
+                image,
+                name,
+                tuple(points[0]),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                colors[name],
+                2,
+            )
+    for track in metrics.get("tracks", []):
+        x1, y1, x2, y2 = track["box"]
+        start = (round(x1 * width), round(y1 * height))
+        end = (round(x2 * width), round(y2 * height))
+        cv2.rectangle(image, start, end, (101, 230, 170), 2)
+        cv2.putText(
+            image,
+            f"person #{track['id']} {track['confidence']:.0%}",
+            (start[0], max(20, start[1] - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (101, 230, 170),
+            2,
+        )
+    cv2.putText(
+        image,
+        f"state: {machine.phase}",
+        (18, height - 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+    )
+    if not zones_configured:
+        cv2.putText(
+            image,
+            "ZONES NOT SAVED - SESSION TRIGGERS DISABLED",
+            (18, 42),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 190, 255),
+            2,
+        )
     ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
     if not ok:
         raise HTTPException(500, "Frame encoding failed")
@@ -598,7 +972,7 @@ async def get_zone_configuration():
 
 @app.put("/api/front-door/zones", dependencies=[Depends(auth)])
 async def save_zone_configuration(item: ZoneConfiguration):
-    global zones
+    global zones, zones_configured
     data = item.model_dump()
     if any(
         not 0 <= value <= 1
@@ -612,6 +986,7 @@ async def save_zone_configuration(item: ZoneConfiguration):
     }
     zone_path.parent.mkdir(parents=True, exist_ok=True)
     zone_path.write_text(json.dumps(data, indent=2))
+    zones_configured = True
     bus.publish("front_door.zones_updated", {"path": str(zone_path)})
     return zones
 

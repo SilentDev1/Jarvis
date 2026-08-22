@@ -1,3 +1,4 @@
+import re
 from dataclasses import asdict, dataclass, field
 
 from ...core.security import authorize, is_injection, sanitize
@@ -14,6 +15,8 @@ class ConversationState:
     visitor_type: str = "unknown"
     status: str = "active"
     badge_requested: bool = False
+    known_person_name: str | None = None
+    face_match_status: str = "UNKNOWN"
     turns: list[dict] = field(default_factory=list)
 
     def public(self):
@@ -23,6 +26,15 @@ class ConversationState:
 def deterministic_reply(state: ConversationState, text: str):
     text = sanitize(text)
     low = text.lower()
+    claimed_name = None
+    name_match = re.search(
+        r"\b(?:i am|i'm|this is|my name is)\s+(?!from\b)([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)(?=\s+from\b|[,.]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if name_match:
+        claimed_name = sanitize(name_match.group(1).strip().title(), 80)
+        state.visitor_name = claimed_name
     if is_injection(text):
         return {
             "reply": "I can only help with your visit. What brings you to the door?",
@@ -67,6 +79,13 @@ def deterministic_reply(state: ConversationState, text: str):
                 "visitor_type": "service",
                 "action": "none",
             }
+        return {
+            "reply": "What are you here to service today?",
+            "visitor_name": claimed_name,
+            "claimed_company": company,
+            "visitor_type": "service",
+            "action": "none",
+        }
     if state.visitor_type == "service" and not state.visitor_name:
         state.visitor_name = text[:80]
         return {
@@ -83,9 +102,18 @@ def deterministic_reply(state: ConversationState, text: str):
             "action": "request_badge",
         }
     if any(x in low for x in ("friend", "visit", "seeing", "here to see")):
+        if not state.known_person_name and not state.visitor_name:
+            state.visitor_type = "friend_family"
+            state.reason = text[:200]
+            return {
+                "reply": "Sure. May I have your name?",
+                "visitor_type": "friend_family",
+                "reason": state.reason,
+                "action": "none",
+            }
         return {
             "reply": "Thank you. I'll notify the homeowner that you're here.",
-            "visitor_type": "friend",
+            "visitor_type": "friend_family",
             "reason": text[:200],
             "action": "notify_homeowner",
         }

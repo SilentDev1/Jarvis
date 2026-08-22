@@ -27,3 +27,5 @@ def test_rtsp_credential_encoding_and_masking():
     s = Settings(camera_host="camera", camera_username="a@b", camera_password="p/x")
     assert "a%40b:p%2Fx" in s.rtsp_url()
     assert s.public()["camera_password"] == "***"
+    assert s.public()["camera_host"] == "***"
+    assert s.public()["camera_username"] == "***"

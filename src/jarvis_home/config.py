@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     store_badge_images: bool = True
     record_audio: bool = False
     face_recognition: bool = False
+    face_detection_model: Path = Path("./data/models/face_detection_yunet_2026may.onnx")
+    face_recognition_model: Path = Path("./data/models/face_recognition_sface_2021dec.onnx")
+    face_recognition_threshold: float = Field(0.45, ge=0.2, le=0.9)
+    face_possible_threshold: float = Field(0.36, ge=0.1, le=0.8)
     media_retention_days: int = Field(30, ge=1, le=3650)
     notification_provider: str = "log"
     ha_mqtt_enabled: bool = False
@@ -52,7 +56,7 @@ class Settings(BaseSettings):
             raise ValueError("CAMERA_MODE must be live or test")
         return v
 
-    @field_validator("data_dir", "log_dir")
+    @field_validator("data_dir", "log_dir", "face_detection_model", "face_recognition_model")
     @classmethod
     def portable_path(cls, v):
         v = Path(v)
@@ -70,7 +74,12 @@ class Settings(BaseSettings):
 
     def public(self):
         d = self.model_dump(mode="json")
-        for k in ("camera_password", "jarvis_admin_token"):
+        for k in (
+            "camera_host",
+            "camera_username",
+            "camera_password",
+            "jarvis_admin_token",
+        ):
             d[k] = "***" if d[k] else ""
         for k in ("camera_rtsp_url_main", "camera_rtsp_url_sub"):
             d[k] = "rtsp://***" if d[k] else ""

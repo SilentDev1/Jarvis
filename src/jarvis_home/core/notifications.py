@@ -13,6 +13,12 @@ def format_visitor_notification(session, badge_captured: bool) -> str:
         arrival = session.arrival_time or "Unknown"
     return "\n".join(
         (
+            "Recognized: "
+            + (
+                f"{session.recognized_name} ({session.recognition_confidence:.0%} match; identity hint only)"
+                if getattr(session, "recognized_name", None)
+                else "Unknown"
+            ),
             f"Name: {session.name or 'Not provided'}",
             f"Company claimed: {session.claimed_company or 'Not provided'}",
             f"Reason: {session.reason or session.visitor_type}",
