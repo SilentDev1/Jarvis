@@ -43,6 +43,7 @@ class FrontDoorStatusResponse(BaseModel):
     speech: str
     status: str
     cameraOnline: bool | None = None
+    presence: str | None = None
     personPresent: bool | None = None
     personCount: int | None = None
     identityStatus: str | None = None
@@ -51,6 +52,9 @@ class FrontDoorStatusResponse(BaseModel):
     packagePresent: bool | None = None
     packageDetectionAvailable: bool = False
     lastDetectionTime: float | None = None
+    observedAt: str | None = None
+    ageMs: int | None = None
+    source: str | None = None
     visitorType: str | None = None
     companyClaimed: str | None = None
     uniformDetected: bool | None = None

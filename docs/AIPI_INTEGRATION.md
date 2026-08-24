@@ -37,6 +37,15 @@ context remains a hint, never authentication. General `jarvis.ask` is omitted:
 the current intelligence layer cannot safely guarantee that it will never
 reach privileged capabilities.
 
+Current presence is derived from the continuously processed local Tapo feed,
+not event history or the visitor database. Every response includes
+`presence` (`PRESENT`, `ABSENT`, or `UNKNOWN`), `observedAt`, `ageMs`, and
+`source`. A positive detection is held for 2.5 seconds so one missed inference
+does not flicker to absent. State older than three seconds triggers a fresh
+snapshot through the same camera and YOLO provider; a failed refresh becomes
+`UNKNOWN`, never a false `ABSENT`. Face identity is evaluated separately and
+cannot change whether a detected human is present.
+
 Every authorized call records device, tool/category, bounded result, duration,
 time, and success/failure. Tokens and raw audio are not stored in audit rows.
 Requests time out at the Core client after five seconds, bodies are limited to

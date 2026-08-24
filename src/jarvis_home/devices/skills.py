@@ -54,9 +54,12 @@ class FrontDoorStatusSkill(CoreSkill):
                 "status": "jarvis_offline",
             }
         camera_online = bool(state.get("camera", {}).get("connected"))
-        tracks = state.get("vision", {}).get("tracks") or []
-        person_count = len(tracks)
-        person_present = person_count > 0
+        live_presence = state.get("presence") or {}
+        presence = live_presence.get("state", "UNKNOWN")
+        person_count = live_presence.get("person_count")
+        person_present = (
+            True if presence == "PRESENT" else False if presence == "ABSENT" else None
+        )
         session_id = state.get("session_id")
         visit = None
         with self.store.Session() as session:
@@ -68,7 +71,7 @@ class FrontDoorStatusSkill(CoreSkill):
         identity_status = "NO_PERSON"
         known_person = None
         face_confidence = None
-        if person_present:
+        if person_present is True:
             identity_status = "UNKNOWN"
             if visit and visit.face_match_status == "KNOWN_HIGH_CONFIDENCE":
                 identity_status = "KNOWN"
@@ -77,11 +80,16 @@ class FrontDoorStatusSkill(CoreSkill):
             elif visit and visit.face_match_status == "POSSIBLE_MATCH":
                 identity_status = "UNCERTAIN"
 
-        if not camera_online:
-            speech = "The front-door camera is offline."
-            status = "camera_offline"
-        elif not person_present:
-            speech = "Nobody is currently at the front door."
+        if not camera_online or presence == "UNKNOWN":
+            speech = (
+                "I can't reliably tell whether someone is at the front door right now."
+            )
+            status = "presence_unknown"
+            presence = "UNKNOWN"
+            person_present = None
+            person_count = None
+        elif presence == "ABSENT":
+            speech = "No, I don't see anyone at the front door."
             status = "clear"
         elif identity_status == "KNOWN" and known_person:
             speech = f"{known_person} is at the front door."
@@ -90,7 +98,9 @@ class FrontDoorStatusSkill(CoreSkill):
             speech = "There is someone at the front door, but I cannot identify them confidently."
             status = "person_present"
         elif person_count == 1:
-            speech = "There is one person at the front door. I do not recognize them."
+            speech = (
+                "Yes, there's someone at the front door, but I don't recognize them."
+            )
             status = "person_present"
         else:
             speech = f"There are {person_count} people at the front door. I do not recognize them."
@@ -101,6 +111,7 @@ class FrontDoorStatusSkill(CoreSkill):
             "status": status,
             "speech": speech,
             "cameraOnline": camera_online,
+            "presence": presence,
             "personPresent": person_present,
             "personCount": person_count,
             "identityStatus": identity_status,
@@ -109,6 +120,9 @@ class FrontDoorStatusSkill(CoreSkill):
             "packagePresent": None,
             "packageDetectionAvailable": False,
             "lastDetectionTime": state.get("vision", {}).get("last_detection"),
+            "observedAt": live_presence.get("observed_at"),
+            "ageMs": live_presence.get("age_ms"),
+            "source": live_presence.get("source", "unavailable"),
             "visitorType": visit.visitor_type if visit else None,
             "companyClaimed": visit.claimed_company if visit else None,
             "uniformDetected": None,

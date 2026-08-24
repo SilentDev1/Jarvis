@@ -127,6 +127,13 @@ async def test_front_door_status_does_not_invent_identity_or_package(device_stor
             json={
                 "camera": {"connected": True},
                 "vision": {"tracks": [{"id": 1}], "last_detection": 123.0},
+                "presence": {
+                    "state": "PRESENT",
+                    "person_count": 1,
+                    "observed_at": "2026-01-01T00:00:00+00:00",
+                    "age_ms": 200,
+                    "source": "live_detection",
+                },
                 "session_id": None,
             },
         )
@@ -145,14 +152,18 @@ async def test_front_door_status_reports_camera_offline(device_store):
     def handler(_request):
         return httpx.Response(
             200,
-            json={"camera": {"connected": False}, "vision": {"tracks": []}},
+            json={
+                "camera": {"connected": False},
+                "vision": {"tracks": []},
+                "presence": {"state": "UNKNOWN", "source": "camera_offline"},
+            },
         )
 
     result = await FrontDoorStatusSkill(
         "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
     ).invoke()
-    assert result["status"] == "camera_offline"
-    assert result["speech"] == "The front-door camera is offline."
+    assert result["status"] == "presence_unknown"
+    assert result["personPresent"] is None
 
 
 @pytest.mark.asyncio
@@ -178,6 +189,12 @@ async def test_front_door_status_uses_only_high_confidence_known_name(device_sto
             json={
                 "camera": {"connected": True},
                 "vision": {"tracks": [{"id": 1}]},
+                "presence": {
+                    "state": "PRESENT",
+                    "person_count": 1,
+                    "age_ms": 100,
+                    "source": "live_detection",
+                },
                 "session_id": "visit-1",
             },
         )
@@ -187,6 +204,58 @@ async def test_front_door_status_uses_only_high_confidence_known_name(device_sto
     ).invoke()
     assert result["identityStatus"] == "KNOWN"
     assert result["speech"] == "Morgan is at the front door."
+
+
+@pytest.mark.asyncio
+async def test_front_door_stale_or_unknown_never_becomes_absent(device_store):
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "camera": {"connected": True},
+                "vision": {"tracks": []},
+                "presence": {
+                    "state": "UNKNOWN",
+                    "person_count": None,
+                    "observed_at": None,
+                    "age_ms": None,
+                    "source": "snapshot_unavailable",
+                },
+            },
+        )
+
+    result = await FrontDoorStatusSkill(
+        "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
+    ).invoke()
+    assert result["presence"] == "UNKNOWN"
+    assert result["personPresent"] is None
+    assert "can't reliably tell" in result["speech"]
+
+
+@pytest.mark.asyncio
+async def test_front_door_fresh_empty_is_absent(device_store):
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "camera": {"connected": True},
+                "vision": {"tracks": []},
+                "presence": {
+                    "state": "ABSENT",
+                    "person_count": 0,
+                    "observed_at": "2026-01-01T00:00:00+00:00",
+                    "age_ms": 100,
+                    "source": "live_detection",
+                },
+            },
+        )
+
+    result = await FrontDoorStatusSkill(
+        "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
+    ).invoke()
+    assert result["presence"] == "ABSENT"
+    assert result["personPresent"] is False
+    assert result["speech"] == "No, I don't see anyone at the front door."
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ import platform
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,7 @@ from .modules.front_door.media import (
     save_jpeg,
     select_sharpest,
 )
+from .modules.front_door.presence import PresenceTracker
 from .modules.front_door.recognition import OpenCVFaceRecognition
 from .modules.front_door.state import VisitorStateMachine
 from .modules.front_door.tracking import CentroidTracker
@@ -107,6 +109,8 @@ sessions: dict[str, ConversationState] = {}
 tracker = CentroidTracker(
     max_missed=max(3, round(cfg.disappear_grace_seconds * cfg.detection_fps))
 )
+presence_tracker = PresenceTracker(cfg.presence_hold_seconds)
+vision_lock = asyncio.Lock()
 started = time.time()
 metrics = {
     "frames": 0,
@@ -117,6 +121,10 @@ metrics = {
     "loop_status": "starting",
     "tracks": [],
     "face_recognition_latency_ms": None,
+    "presence": "UNKNOWN",
+    "person_count": None,
+    "observed_at": None,
+    "observation_source": "starting",
 }
 zone_path = Path(cfg.data_dir) / "zones.json"
 zones_configured = zone_path.exists()
@@ -521,7 +529,8 @@ async def live_vision_loop():
                 continue
             last_inference = now
             t0 = time.perf_counter()
-            detections = await vision.detect(frame)
+            async with vision_lock:
+                detections = await vision.detect(frame)
             detections = tracker.update(detections)
             window_inferences += 1
             metrics["detection_latency_ms"] = round(
@@ -535,14 +544,19 @@ async def live_vision_loop():
                     window_inferences = 0
                 continue
             people = [item for item in detections if item.label == "person"]
+            observation = presence_tracker.observe(people, time.time())
             metrics["tracks"] = [
                 {
                     "id": item.track_id,
                     "box": item.box,
                     "confidence": round(item.confidence, 3),
                 }
-                for item in people
+                for item in observation.detections
             ]
+            metrics["presence"] = observation.presence
+            metrics["person_count"] = observation.person_count
+            metrics["observed_at"] = observation.observed_at
+            metrics["observation_source"] = observation.source
             zone = (
                 classify(max(people, key=lambda item: item.confidence).box, zones)
                 if people
@@ -554,6 +568,16 @@ async def live_vision_loop():
             if people:
                 metrics["detections"] += 1
                 metrics["last_detection"] = time.time()
+                logger.debug(
+                    "front-door observation time=%s people=%d threshold=%.2f boxes=%s",
+                    metrics["last_detection"],
+                    len(people),
+                    cfg.detection_confidence,
+                    [
+                        {"confidence": round(item.confidence, 3), "box": item.box}
+                        for item in people
+                    ],
+                )
                 if not previous_present:
                     bus.publish("person.detected", {"count": len(people), "zone": zone})
                 if zone != previous_zone:
@@ -581,6 +605,9 @@ async def live_vision_loop():
         raise
     except Exception:
         metrics["loop_status"] = "error"
+        metrics["presence"] = "UNKNOWN"
+        metrics["person_count"] = None
+        metrics["observation_source"] = "vision_error"
         logger.exception("Live vision loop stopped")
         bus.publish("system.error", {"component": "vision_loop"})
 
@@ -1022,8 +1049,45 @@ async def delete_known_person(person_id: int):
     return {"id": person_id, "display_name": name, "status": "deleted"}
 
 
+async def refresh_presence_if_stale():
+    observed_at = metrics.get("observed_at")
+    age = time.time() - observed_at if observed_at else float("inf")
+    if age <= cfg.presence_freshness_seconds:
+        return
+    if not camera.health().get("connected"):
+        presence_tracker.unknown("camera_offline")
+    else:
+        frame = await camera.snapshot(high_quality=False)
+        if frame is None:
+            presence_tracker.unknown("snapshot_unavailable")
+        else:
+            try:
+                async with vision_lock:
+                    detections = await vision.detect(frame)
+                presence_tracker.observe(detections, frame.timestamp)
+            except Exception:
+                logger.exception("Fresh front-door presence check failed")
+                presence_tracker.unknown("vision_error")
+    observation = presence_tracker.current
+    metrics["presence"] = observation.presence
+    metrics["person_count"] = observation.person_count
+    metrics["observed_at"] = observation.observed_at
+    metrics["observation_source"] = observation.source
+    metrics["tracks"] = [
+        {
+            "id": item.track_id,
+            "box": item.box,
+            "confidence": round(item.confidence, 3),
+        }
+        for item in observation.detections
+    ]
+
+
 @app.get("/api/front-door")
 async def front_door():
+    await refresh_presence_if_stale()
+    observed_at = metrics.get("observed_at")
+    age_ms = round(max(0, time.time() - observed_at) * 1000) if observed_at else None
     return {
         "phase": machine.phase,
         "session_id": machine.session_id,
@@ -1031,6 +1095,15 @@ async def front_door():
         "vision_provider": type(vision).__name__,
         "voice": voice.health(),
         "vision": metrics,
+        "presence": {
+            "state": metrics.get("presence", "UNKNOWN"),
+            "person_count": metrics.get("person_count"),
+            "observed_at": datetime.fromtimestamp(observed_at, UTC).isoformat()
+            if observed_at
+            else None,
+            "age_ms": age_ms,
+            "source": metrics.get("observation_source", "unavailable"),
+        },
         "zones": zones,
         "zones_configured": zones_configured,
         "face_recognition": {

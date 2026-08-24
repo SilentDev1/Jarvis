@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     vision_model: str = "yolo11n.pt"
     detection_confidence: float = Field(0.5, ge=0.1, le=1)
     detection_fps: float = Field(3, ge=0.2, le=30)
+    presence_freshness_seconds: float = Field(3, ge=1, le=15)
+    presence_hold_seconds: float = Field(2.5, ge=0, le=10)
     voice_satellite: str = "simulator"
     ai_provider: str = "ollama"
     ollama_url: str = "http://127.0.0.1:11434"
