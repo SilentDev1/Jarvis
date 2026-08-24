@@ -15,7 +15,18 @@ if command -v esptool >/dev/null 2>&1; then ESPTOOL=esptool
 elif python3 -m esptool version >/dev/null 2>&1; then ESPTOOL="python3 -m esptool"
 else echo "esptool is required" >&2; exit 3; fi
 
-IDENTITY=$($ESPTOOL --chip esp32s3 --port "$AIPI_PORT" chip-id)
+ESPTOOL_MAJOR=$($ESPTOOL version | awk 'NR == 1 { value=$2; sub(/^v/, "", value); split(value, parts, "."); print parts[1] }')
+if [ "${ESPTOOL_MAJOR:-0}" -ge 5 ]; then
+  CHIP_ID_COMMAND=chip-id
+  WRITE_FLASH_COMMAND=write-flash
+  VERIFY_FLASH_COMMAND=verify-flash
+else
+  CHIP_ID_COMMAND=chip_id
+  WRITE_FLASH_COMMAND=write_flash
+  VERIFY_FLASH_COMMAND=verify_flash
+fi
+
+IDENTITY=$($ESPTOOL --chip esp32s3 --port "$AIPI_PORT" "$CHIP_ID_COMMAND")
 echo "$IDENTITY" | grep -q "ESP32-S3"
 echo "$IDENTITY" | grep -Fq "$AIPI_EXPECTED_MAC"
 
@@ -30,7 +41,7 @@ echo "WARNING: this writes the complete factory image to $AIPI_PORT."
 echo "Press Ctrl-C now unless a factory restore is intentionally required."
 sleep 10
 # shellcheck disable=SC2086
-$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" write-flash 0x0 "$AIPI_FACTORY_BACKUP_DIR/full-flash.bin"
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" "$WRITE_FLASH_COMMAND" 0x0 "$AIPI_FACTORY_BACKUP_DIR/full-flash.bin"
 # shellcheck disable=SC2086
-$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" verify-flash 0x0 "$AIPI_FACTORY_BACKUP_DIR/full-flash.bin"
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" "$VERIFY_FLASH_COMMAND" 0x0 "$AIPI_FACTORY_BACKUP_DIR/full-flash.bin"
 echo "Factory image restored and verified. Reset the device and run the physical checklist."

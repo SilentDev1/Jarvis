@@ -11,6 +11,12 @@ The private backup is outside the repository at
 `/Users/silentd3v/Documents/SilentDev-Workspace/private-backups/aipi/<device-id>/20260824T192347Z`.
 Stock firmware remains intact; no write or erase command was executed.
 
+Update: on 2026-08-24, after the recovery gate was reverified, the authorized
+Jarvis `0.1.0-bringup` stage-1 image was written. The complete factory backup and
+checksum-gated restore remain available. The custom write did not erase the
+factory NVS range at `0x9000`; nevertheless, complete restoration at `0x0`
+remains the preferred recovery path.
+
 The physically decoded map is:
 
 | Image | Address | Size |
