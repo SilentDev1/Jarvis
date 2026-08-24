@@ -14,7 +14,7 @@
 <script>
 localStorage.removeItem('jarvisToken');
 let sid=null,zones={observation:[],approach:[],interaction:[]};
-function showLogin(){loginOverlay.classList.add('show');loginUsername.focus()}
+function showLogin(){let opening=!loginOverlay.classList.contains('show');loginOverlay.classList.add('show');if(opening)loginUsername.focus()}
 async function login(event){event.preventDefault();loginError.textContent='';let r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:loginUsername.value,password:loginPassword.value})});if(!r.ok){loginError.textContent='Incorrect username or password';return}loginPassword.value='';loginOverlay.classList.remove('show');refresh()}
 async function logout(){await fetch('/api/auth/logout',{method:'POST'});showLogin()}
 async function j(url,opt={}){opt.headers={...(opt.headers||{}),'Content-Type':'application/json'};let r=await fetch(url,opt);if(r.status===401){showLogin();throw Error('Admin login required')}if(!r.ok)throw Error(await r.text());return r.json()}
