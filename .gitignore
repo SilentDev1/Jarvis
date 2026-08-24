@@ -15,4 +15,10 @@ logs/*
 !logs/.gitkeep
 run/
 backups/
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+data/audio/
+*.pcm
+*.wav
 .DS_Store

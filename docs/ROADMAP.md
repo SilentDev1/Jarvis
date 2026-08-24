@@ -10,6 +10,11 @@
 ## Owner/account validation
 
 - Verify the two-press AiPi workflow and self-hearing behavior physically
+- Connect AiPi by data-capable USB, enter ROM download mode, and complete the
+  verified factory backup/recovery gate before any custom flash
+- Install pinned ESP-IDF/esptool and build the non-flashed firmware scaffold
+- Physically verify display/audio/button pins before enabling hardware drivers
+- Add and validate local Whisper STT; then run simulated and physical voice flow
 - Enroll a consenting visitor at the door, then verify recognition on return
 - Replace the temporary Quick Tunnel with an account-owned named tunnel
 - Confirm XDC publish/deploy semantics and physical-device agent assignment

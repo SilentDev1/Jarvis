@@ -76,8 +76,10 @@ class Settings(BaseSettings):
     @field_validator("voice_satellite")
     @classmethod
     def voice_satellite_ok(cls, v):
-        if v not in {"simulator", "aipi_stock"}:
-            raise ValueError("VOICE_SATELLITE must be simulator or aipi_stock")
+        if v not in {"simulator", "aipi_stock", "aipi_local"}:
+            raise ValueError(
+                "VOICE_SATELLITE must be simulator, aipi_stock, or aipi_local"
+            )
         return v
 
     @field_validator(

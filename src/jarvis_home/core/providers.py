@@ -41,6 +41,9 @@ class AIProvider(ABC):
 
 
 class VoiceTerminalProvider(ABC):
+    async def set_session(self, session_id: str | None) -> None:
+        """Associate subsequent terminal operations with a visitor session."""
+
     @abstractmethod
     async def speak(self, text: str) -> None: ...
 

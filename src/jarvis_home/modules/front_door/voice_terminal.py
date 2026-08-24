@@ -84,6 +84,7 @@ class VoiceTerminalService:
             )
             return False
         try:
+            await self.provider.set_session(session_id)
             await self.provider.speak(greeting)
             await self.provider.start_listening()
         except Exception as error:  # noqa: BLE001 - provider boundary fails closed
@@ -152,7 +153,15 @@ class VoiceTerminalService:
     async def end(self, session_id: str, reason: str) -> bool:
         if not self.active or self.active.visitor_session_id != session_id:
             return False
-        await self.provider.stop_listening()
+        try:
+            await self.provider.stop_listening()
+        except Exception as error:  # noqa: BLE001 - cleanup remains fail closed
+            self.bus.publish(
+                "voice.terminal_error",
+                {"session_id": session_id, "error": type(error).__name__},
+            )
+        finally:
+            await self.provider.set_session(None)
         self.active.phase = VoiceConversationPhase.COMPLETE
         self.active.end_reason = reason
         self.bus.publish(

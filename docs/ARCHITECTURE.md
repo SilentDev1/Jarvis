@@ -12,3 +12,9 @@ explicit database-backed `(device, tool)` allowlist maps only named read-only
 tools to existing Core services; no generic dispatch exists. The external
 tunnel terminates at this gateway, never at the Hub. See
 `docs/AIPI_INTEGRATION.md` for its threat boundary, lifecycle, and verification.
+
+The custom-firmware path adds an authenticated local WebSocket boundary inside
+Jarvis Core. It is layered as Front Door -> Visitor/Voice services ->
+AiPiLocalVoice -> LocalVoiceHub -> WebSocket terminal. It does not replace or
+weaken the stock MCP gateway, and it is not externally exposed. See
+`AIPI_PROTOCOL.md` and `AIPI_CUSTOM_FIRMWARE.md`.

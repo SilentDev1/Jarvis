@@ -15,17 +15,30 @@ from typing import Any
 
 import numpy as np
 import psutil
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from .config import get_settings
 from .core.events import EventBus
 from .core.notifications import format_visitor_notification
+from .core.providers import VoiceTerminalProvider
 from .core.security import sanitize
+from .core.speech import MacSayTTS
 from .core.voice_input import is_meaningful_utterance
-from .devices.auth import issue_device_token, revoke_device_tokens
+from .devices.auth import (
+    authenticate_device,
+    issue_device_token,
+    revoke_device_tokens,
+)
+from .devices.voice_protocol import (
+    SUBPROTOCOL,
+    AiPiLocalVoice,
+    LocalVoiceHub,
+    parse_control,
+)
 from .integrations.providers import (
     LogNotification,
     MockVision,
@@ -104,7 +117,14 @@ try:
 except Exception:  # noqa: BLE001 - optional provider import/model failures must degrade safely
     vision = MockVision()
 ai = OllamaAI(cfg.ollama_url, cfg.ollama_model)
-voice = StockAiPiVoice() if cfg.voice_satellite == "aipi_stock" else SimulatorVoice()
+local_voice_hub = LocalVoiceHub(bus)
+voice: VoiceTerminalProvider
+if cfg.voice_satellite == "aipi_local":
+    voice = AiPiLocalVoice(local_voice_hub, MacSayTTS())
+elif cfg.voice_satellite == "aipi_stock":
+    voice = StockAiPiVoice()
+else:
+    voice = SimulatorVoice()
 voice_service = VoiceTerminalService(
     voice,
     bus,
@@ -716,6 +736,49 @@ async def lifespan(app):
 app = FastAPI(title="Jarvis Home", version="0.1.0", lifespan=lifespan)
 
 
+@app.websocket("/ws/devices/voice")
+async def local_voice_gateway(websocket: WebSocket):
+    authorization = websocket.headers.get("authorization", "")
+    token = (
+        authorization[7:]
+        if authorization.lower().startswith("bearer ")
+        else None
+    )
+    device = authenticate_device(store, token)
+    if device is None or device.id != "aipi-front-door":
+        await websocket.close(code=4401, reason="unauthorized_device")
+        return
+    requested = websocket.headers.get("sec-websocket-protocol", "")
+    protocols = {item.strip() for item in requested.split(",") if item.strip()}
+    if SUBPROTOCOL not in protocols:
+        await websocket.close(code=4406, reason="subprotocol_required")
+        return
+    await websocket.accept(subprotocol=SUBPROTOCOL)
+    client_ip = websocket.client.host if websocket.client else None
+    await local_voice_hub.attach(websocket, device.id, client_ip)
+    reason = "disconnected"
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if message.get("text") is not None:
+                local_voice_hub.receive_control(parse_control(message["text"]))
+            elif message.get("bytes") is not None:
+                local_voice_hub.receive_audio(message["bytes"])
+    except WebSocketDisconnect:
+        pass
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        reason = str(error)[:80]
+        bus.publish(
+            "voice.protocol_rejected",
+            {"device_id": device.id, "reason": reason},
+        )
+        await websocket.close(code=1008, reason=reason)
+    finally:
+        await local_voice_hub.detach(reason, websocket)
+
+
 @app.post("/api/auth/login")
 async def login(item: LoginInput):
     username_ok = secrets.compare_digest(item.username, cfg.jarvis_admin_username)
@@ -798,11 +861,12 @@ async def health_db():
 
 @app.get("/health/devices")
 async def health_devices():
+    voice_health = voice.health()
     return {
         "status": "ready",
         "camera": camera.health(),
-        "voice": voice.health(),
-        "aipi": "waiting_for_hardware",
+        "voice": voice_health,
+        "aipi": voice_health,
         "face_recognition": {
             "enabled": cfg.face_recognition,
             "ready": face_recognition is not None,
@@ -855,6 +919,8 @@ async def devices():
                     )
                 ).all()
             )
+            if device.id == "aipi-front-door":
+                item["local_voice"] = voice.health()
             item["recent_requests"] = [
                 {
                     "tool": row.skill,
