@@ -2,8 +2,10 @@
 
 `firmware/aipi-jarvis` is version `0.1.0-preflash`: an ESP-IDF scaffold, not a
 physical firmware release. It defines the explicit terminal states and protocol
-commands. Hardware drivers are intentionally absent because no factory backup
-exists and GPIO/audio behavior has not been verified on this exact unit.
+commands. Hardware drivers are intentionally absent because GPIO/audio behavior
+has not been verified on this exact unit. The mandatory factory-image gate
+passed on 2026-08-24 with two identical full-flash reads and an exact partition
+map; no custom firmware has yet been written.
 
 ESP-IDF is selected for native ESP32-S3 bootloader, OTA rollback, NVS, Wi-Fi,
 WebSocket/TLS, I2S, and diagnostics support. The intended modules are app/state,
@@ -26,5 +28,6 @@ Scripts:
 - `aipi-restore-factory.sh`: checksum-gated full-image restore
 - `aipi-simulator.py`: host protocol simulator only
 
-The build and flash tools are currently unavailable on this Mac (`idf.py` and
-`esptool` were not found). No firmware has been built or flashed.
+`esptool` 5.3.1 is installed in the project virtual environment. ESP-IDF
+`idf.py` is not yet installed, so the full firmware has not been built. No
+firmware has been flashed.

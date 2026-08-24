@@ -18,6 +18,6 @@ fi
 
 echo "Read-only AiPi probe on $AIPI_PORT"
 # shellcheck disable=SC2086
-$ESPTOOL --port "$AIPI_PORT" chip_id
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" chip-id
 # shellcheck disable=SC2086
-$ESPTOOL --port "$AIPI_PORT" flash_id
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" flash-id

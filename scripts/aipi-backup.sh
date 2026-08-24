@@ -23,9 +23,9 @@ SECOND="$DEST/full-flash.read2.bin"
 
 echo "Reading full flash twice. Nothing will be erased or written."
 # shellcheck disable=SC2086
-$ESPTOOL --port "$AIPI_PORT" read_flash 0 "$AIPI_FLASH_SIZE_BYTES" "$FIRST"
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" read-flash 0 "$AIPI_FLASH_SIZE_BYTES" "$FIRST"
 # shellcheck disable=SC2086
-$ESPTOOL --port "$AIPI_PORT" read_flash 0 "$AIPI_FLASH_SIZE_BYTES" "$SECOND"
+$ESPTOOL --chip esp32s3 --port "$AIPI_PORT" read-flash 0 "$AIPI_FLASH_SIZE_BYTES" "$SECOND"
 cmp "$FIRST" "$SECOND"
 mv "$FIRST" "$DEST/full-flash.bin"
 rm "$SECOND"
