@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 data/*.db*
+data/*token*
 data/zones.json
 data/media/*
 !data/media/.gitkeep

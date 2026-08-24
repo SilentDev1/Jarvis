@@ -3,7 +3,7 @@ name="jarvis-home"
 version="0.1.0"
 description="Portable, local-first home intelligence platform"
 requires-python=">=3.11"
-dependencies=["fastapi>=0.115,<1","uvicorn[standard]>=0.32,<1","pydantic-settings>=2.6,<3","sqlalchemy>=2,<3","httpx>=0.27,<1","python-multipart>=0.0.12,<1","psutil>=6,<8"]
+dependencies=["fastapi>=0.115,<1","uvicorn[standard]>=0.32,<1","pydantic-settings>=2.6,<3","sqlalchemy>=2,<3","httpx>=0.27,<1","python-multipart>=0.0.12,<1","psutil>=6,<8","mcp>=2,<3"]
 [project.optional-dependencies]
 vision=["opencv-python-headless>=4.10,<5","numpy>=2,<3","ultralytics>=8.3,<9"]
 ocr=["pytesseract>=0.3.13,<1","opencv-python-headless>=4.10,<5"]

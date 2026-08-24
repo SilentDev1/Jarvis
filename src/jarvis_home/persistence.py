@@ -113,6 +113,35 @@ class Device(Base):
     provider: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String)
     last_seen: Mapped[str | None] = mapped_column(String, nullable=True)
+    workspace_id: Mapped[str] = mapped_column(String, default="home")
+    device_identifier: Mapped[str | None] = mapped_column(String, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    capabilities: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
+class DeviceCredential(Base):
+    __tablename__ = "device_credentials"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"))
+    token_hash: Mapped[str] = mapped_column(String, unique=True)
+    token_prefix: Mapped[str] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(String)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class DeviceAudit(Base):
+    __tablename__ = "device_audit"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(String)
+    request: Mapped[str] = mapped_column(String)
+    skill: Mapped[str] = mapped_column(String)
+    result: Mapped[str] = mapped_column(Text)
+    response_status: Mapped[str] = mapped_column(String)
+    timestamp: Mapped[str] = mapped_column(String)
 
 
 class SystemEvent(Base):
@@ -139,6 +168,7 @@ class Store:
         Base.metadata.create_all(self.engine)
         self._migrate_badge_evidence()
         self._migrate_face_recognition()
+        self._migrate_devices()
         self.seed_devices()
 
     def _migrate_badge_evidence(self):
@@ -191,6 +221,35 @@ class Store:
                 (utcnow(),),
             )
 
+    def _migrate_devices(self):
+        additions = {
+            "workspace_id": "VARCHAR DEFAULT 'home'",
+            "device_identifier": "VARCHAR",
+            "enabled": "BOOLEAN DEFAULT 1",
+            "location": "VARCHAR",
+            "capabilities": "TEXT DEFAULT '[]'",
+            "created_at": "VARCHAR",
+            "updated_at": "VARCHAR",
+        }
+        now = utcnow()
+        with self.engine.begin() as connection:
+            existing = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(devices)"
+                ).fetchall()
+            }
+            for column, kind in additions.items():
+                if column not in existing:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE devices ADD COLUMN {column} {kind}"
+                    )
+            connection.exec_driver_sql(
+                "UPDATE devices SET created_at=COALESCE(created_at, ?), "
+                "updated_at=COALESCE(updated_at, ?)",
+                (now, now),
+            )
+
     def seed_devices(self):
         with self.Session() as s:
             for d in (
@@ -201,6 +260,11 @@ class Store:
                     module="front_door",
                     provider="tapo",
                     status="configured",
+                    workspace_id="home",
+                    location="Front Door",
+                    capabilities='["VIDEO"]',
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 ),
                 Device(
                     id="aipi-front-door",
@@ -209,6 +273,11 @@ class Store:
                     module="front_door",
                     provider="aipi",
                     status="waiting_for_hardware",
+                    workspace_id="home",
+                    location="Front Door",
+                    capabilities='["VOICE_INPUT","VOICE_OUTPUT","DISPLAY","BUTTON"]',
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 ),
             ):
                 if not s.get(Device, d.id):

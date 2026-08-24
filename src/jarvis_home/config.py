@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     jarvis_admin_username: str = Field("admin", min_length=1, max_length=80)
     jarvis_admin_password: str = Field("change-this-password", min_length=8)
     admin_session_days: int = Field(30, ge=1, le=365)
+    device_gateway_host: str = "127.0.0.1"
+    device_gateway_port: int = 8766
+    jarvis_core_url: str = "http://127.0.0.1:8765"
+    mcp_allowed_hosts: str = "127.0.0.1,localhost"
     data_dir: Path = Path("./data")
     log_dir: Path = Path("./logs")
     camera_mode: str = "test"
