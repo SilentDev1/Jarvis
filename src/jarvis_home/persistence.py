@@ -1,6 +1,16 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import (
+    Boolean,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -120,6 +130,9 @@ class Device(Base):
     capabilities: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
+    last_successful_request: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_failed_request: Mapped[str | None] = mapped_column(String, nullable=True)
+    connection_state: Mapped[str] = mapped_column(String, default="unknown")
 
 
 class DeviceCredential(Base):
@@ -133,6 +146,17 @@ class DeviceCredential(Base):
     revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class DeviceToolPermission(Base):
+    __tablename__ = "device_tool_permissions"
+    __table_args__ = (UniqueConstraint("device_id", "tool_name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"))
+    tool_name: Mapped[str] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+
+
 class DeviceAudit(Base):
     __tablename__ = "device_audit"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -141,6 +165,20 @@ class DeviceAudit(Base):
     skill: Mapped[str] = mapped_column(String)
     result: Mapped[str] = mapped_column(Text)
     response_status: Mapped[str] = mapped_column(String)
+    timestamp: Mapped[str] = mapped_column(String)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class FrontDoorEvent(Base):
+    __tablename__ = "front_door_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_type: Mapped[str] = mapped_column(String)
+    camera_id: Mapped[str] = mapped_column(String, default="tapo-front-door")
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    known_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     timestamp: Mapped[str] = mapped_column(String)
 
 
@@ -169,6 +207,7 @@ class Store:
         self._migrate_badge_evidence()
         self._migrate_face_recognition()
         self._migrate_devices()
+        self._migrate_device_audit()
         self.seed_devices()
 
     def _migrate_badge_evidence(self):
@@ -230,6 +269,9 @@ class Store:
             "capabilities": "TEXT DEFAULT '[]'",
             "created_at": "VARCHAR",
             "updated_at": "VARCHAR",
+            "last_successful_request": "VARCHAR",
+            "last_failed_request": "VARCHAR",
+            "connection_state": "VARCHAR DEFAULT 'unknown'",
         }
         now = utcnow()
         with self.engine.begin() as connection:
@@ -249,6 +291,24 @@ class Store:
                 "updated_at=COALESCE(updated_at, ?)",
                 (now, now),
             )
+
+    def _migrate_device_audit(self):
+        additions = {
+            "duration_ms": "FLOAT DEFAULT 0",
+            "error_code": "VARCHAR",
+        }
+        with self.engine.begin() as connection:
+            existing = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(device_audit)"
+                ).fetchall()
+            }
+            for column, kind in additions.items():
+                if column not in existing:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE device_audit ADD COLUMN {column} {kind}"
+                    )
 
     def seed_devices(self):
         with self.Session() as s:
@@ -282,6 +342,30 @@ class Store:
             ):
                 if not s.get(Device, d.id):
                     s.add(d)
+            s.flush()
+            existing = {
+                row.tool_name
+                for row in s.scalars(
+                    select(DeviceToolPermission).where(
+                        DeviceToolPermission.device_id == "aipi-front-door"
+                    )
+                ).all()
+            }
+            for tool_name in (
+                "jarvis.status",
+                "jarvis.frontDoor.status",
+                "jarvis.frontDoor.recent",
+            ):
+                if tool_name not in existing:
+                    s.add(
+                        DeviceToolPermission(
+                            device_id="aipi-front-door",
+                            tool_name=tool_name,
+                            enabled=True,
+                            created_at=utcnow(),
+                            updated_at=utcnow(),
+                        )
+                    )
             s.commit()
 
     def event(self, event, detail=""):

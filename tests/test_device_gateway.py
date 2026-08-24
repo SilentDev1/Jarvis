@@ -2,6 +2,7 @@ import json
 
 import httpx
 import pytest
+from sqlalchemy import select
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -12,9 +13,20 @@ from jarvis_home.devices.auth import (
     issue_device_token,
     revoke_device_tokens,
 )
-from jarvis_home.devices.mcp_gateway import DeviceAuthMiddleware
-from jarvis_home.devices.skills import JarvisStatusSkill
-from jarvis_home.persistence import Device, Store
+from jarvis_home.devices.mcp_gateway import DeviceAuthMiddleware, DeviceRateLimiter
+from jarvis_home.devices.skills import (
+    FrontDoorRecentSkill,
+    FrontDoorStatusSkill,
+    JarvisStatusSkill,
+)
+from jarvis_home.persistence import (
+    Device,
+    DeviceToolPermission,
+    FrontDoorEvent,
+    Store,
+    VisitorSession,
+    utcnow,
+)
 
 
 @pytest.fixture
@@ -51,10 +63,30 @@ def test_gateway_requires_device_authorization(device_store):
     token = issue_device_token(device_store, "aipi-front-door")
     with TestClient(app) as client:
         assert client.post("/mcp").status_code == 401
-        response = client.post(
-            "/mcp", headers={"Authorization": f"Bearer {token}"}
-        )
+        response = client.post("/mcp", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
+
+
+def test_gateway_rejects_oversized_requests(device_store):
+    async def endpoint(_request):
+        return JSONResponse({"ok": True})
+
+    wrapped = Starlette(routes=[Route("/mcp", endpoint, methods=["POST"])])
+    app = DeviceAuthMiddleware(wrapped, device_store, max_body_bytes=4)
+    token = issue_device_token(device_store, "aipi-front-door")
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp", content="12345", headers={"Authorization": f"Bearer {token}"}
+        )
+    assert response.status_code == 413
+
+
+def test_rate_limiter_is_bounded_and_recovers():
+    limiter = DeviceRateLimiter(limit=2, window_seconds=10)
+    assert limiter.allow("device", now=0)
+    assert limiter.allow("device", now=1)
+    assert not limiter.allow("device", now=2)
+    assert limiter.allow("device", now=11)
 
 
 @pytest.mark.asyncio
@@ -86,8 +118,110 @@ async def test_status_skill_handles_provider_failure():
     }
 
 
+@pytest.mark.asyncio
+async def test_front_door_status_does_not_invent_identity_or_package(device_store):
+    def handler(request):
+        assert request.url.path == "/api/front-door"
+        return httpx.Response(
+            200,
+            json={
+                "camera": {"connected": True},
+                "vision": {"tracks": [{"id": 1}], "last_detection": 123.0},
+                "session_id": None,
+            },
+        )
+
+    result = await FrontDoorStatusSkill(
+        "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
+    ).invoke()
+    assert result["identityStatus"] == "UNKNOWN"
+    assert result["knownPerson"] is None
+    assert result["packageDetectionAvailable"] is False
+    assert result["packagePresent"] is None
+
+
+@pytest.mark.asyncio
+async def test_front_door_status_reports_camera_offline(device_store):
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={"camera": {"connected": False}, "vision": {"tracks": []}},
+        )
+
+    result = await FrontDoorStatusSkill(
+        "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
+    ).invoke()
+    assert result["status"] == "camera_offline"
+    assert result["speech"] == "The front-door camera is offline."
+
+
+@pytest.mark.asyncio
+async def test_front_door_status_uses_only_high_confidence_known_name(device_store):
+    with device_store.Session() as session:
+        session.add(
+            VisitorSession(
+                id="visit-1",
+                arrival_time=utcnow(),
+                visitor_type="known_person",
+                status="active",
+                confidence=0.9,
+                face_match_status="KNOWN_HIGH_CONFIDENCE",
+                recognized_name="Morgan",
+                recognition_confidence=0.82,
+            )
+        )
+        session.commit()
+
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "camera": {"connected": True},
+                "vision": {"tracks": [{"id": 1}]},
+                "session_id": "visit-1",
+            },
+        )
+
+    result = await FrontDoorStatusSkill(
+        "http://jarvis.test", device_store, transport=httpx.MockTransport(handler)
+    ).invoke()
+    assert result["identityStatus"] == "KNOWN"
+    assert result["speech"] == "Morgan is at the front door."
+
+
+@pytest.mark.asyncio
+async def test_recent_activity_is_bounded(device_store):
+    with device_store.Session() as session:
+        for _index in range(8):
+            session.add(
+                FrontDoorEvent(
+                    event_type="PERSON_DETECTED",
+                    timestamp=utcnow(),
+                    metadata_json='{"private_path":"must-not-leak"}',
+                )
+            )
+        session.commit()
+    result = await FrontDoorRecentSkill(device_store).invoke()
+    assert len(result["events"]) == 5
+    assert result["bounded"] is True
+    assert all("metadata" not in event for event in result["events"])
+
+
 def test_registered_aipi_is_workspace_scoped(device_store):
     with device_store.Session() as session:
         device = session.get(Device, "aipi-front-door")
         assert device.workspace_id == "home"
         assert "VOICE_INPUT" in json.loads(device.capabilities)
+        tools = {
+            row.tool_name
+            for row in session.scalars(
+                select(DeviceToolPermission).where(
+                    DeviceToolPermission.device_id == device.id
+                )
+            ).all()
+        }
+        assert tools == {
+            "jarvis.status",
+            "jarvis.frontDoor.status",
+            "jarvis.frontDoor.recent",
+        }

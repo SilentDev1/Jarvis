@@ -6,3 +6,9 @@ The event bus publishes stable dotted event names and retains bounded recent his
 
 Front Door owns zones, tracking/session lifecycle, concierge policy, badge/package workflows. It cannot execute shell commands or access-control actions. Platform-specific acceleration belongs only in providers. Relative/configured persistent paths make Mac and Linux deployments behaviorally equivalent.
 
+The AiPi device boundary is a separate localhost MCP gateway. Device bearer
+credentials are hashed and independent from Hub administrator sessions. An
+explicit database-backed `(device, tool)` allowlist maps only named read-only
+tools to existing Core services; no generic dispatch exists. The external
+tunnel terminates at this gateway, never at the Hub. See
+`docs/AIPI_INTEGRATION.md` for its threat boundary, lifecycle, and verification.

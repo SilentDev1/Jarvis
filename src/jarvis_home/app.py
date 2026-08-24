@@ -22,6 +22,7 @@ from .config import get_settings
 from .core.events import EventBus
 from .core.notifications import format_visitor_notification
 from .core.security import sanitize
+from .devices.auth import issue_device_token, revoke_device_tokens
 from .integrations.providers import (
     LogNotification,
     MockVision,
@@ -52,6 +53,10 @@ from .persistence import (
     Badge,
     ConversationTurn,
     Device,
+    DeviceAudit,
+    DeviceCredential,
+    DeviceToolPermission,
+    FrontDoorEvent,
     Image,
     KnownPerson,
     Store,
@@ -166,6 +171,47 @@ def persist_event(event):
 bus.subscribe(persist_event)
 
 
+FRONT_DOOR_EVENT_TYPES = {
+    "person.detected": "PERSON_DETECTED",
+    "visitor.face_recognized": "KNOWN_PERSON",
+    "visitor.face_unknown": "UNKNOWN_PERSON",
+    "visitor.face_insufficient": "UNKNOWN_PERSON",
+    "visitor.session_started": "VISITOR_SESSION_STARTED",
+    "visitor.departed": "VISITOR_DEPARTED",
+    "visitor.badge_captured": "BADGE_CAPTURED",
+    "package.detected": "PACKAGE_DETECTED",
+    "package.removed": "PACKAGE_REMOVED",
+}
+
+
+def persist_front_door_event(event):
+    event_type = FRONT_DOOR_EVENT_TYPES.get(event.type)
+    if not event_type:
+        return
+    payload = event.payload
+    safe_metadata = {
+        key: payload[key]
+        for key in ("zone", "track_id", "face_match_status", "recognized_name")
+        if key in payload
+    }
+    with store.Session() as session:
+        session.add(
+            FrontDoorEvent(
+                event_type=event_type,
+                camera_id="tapo-front-door",
+                session_id=payload.get("session_id"),
+                confidence=payload.get("confidence"),
+                known_person_id=payload.get("known_person_id"),
+                metadata_json=json.dumps(safe_metadata)[:1000],
+                timestamp=event.timestamp,
+            )
+        )
+        session.commit()
+
+
+bus.subscribe(persist_front_door_event)
+
+
 def create_session_cookie(expires_at: int) -> str:
     payload = f"{cfg.jarvis_admin_username}:{expires_at}"
     signature = hmac.new(
@@ -226,6 +272,11 @@ class KnownPersonEnrollment(BaseModel):
 
 class KnownPersonUpdate(BaseModel):
     enabled: bool
+
+
+class DeviceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    enabled: bool | None = None
 
 
 def media_path(relative_path: str | None) -> Path | None:
@@ -688,13 +739,127 @@ async def system():
     }
 
 
-@app.get("/api/devices")
+@app.get("/api/devices", dependencies=[Depends(auth)])
 async def devices():
     with store.Session() as s:
-        return [
-            {c.name: getattr(d, c.name) for c in Device.__table__.columns}
-            for d in s.scalars(select(Device)).all()
-        ]
+        result = []
+        for device in s.scalars(select(Device)).all():
+            item = {c.name: getattr(device, c.name) for c in Device.__table__.columns}
+            item["capabilities"] = json.loads(device.capabilities or "[]")
+            item["tools"] = [
+                p.tool_name
+                for p in s.scalars(
+                    select(DeviceToolPermission).where(
+                        DeviceToolPermission.device_id == device.id,
+                        DeviceToolPermission.enabled.is_(True),
+                    )
+                ).all()
+            ]
+            item["credential_count"] = len(
+                s.scalars(
+                    select(DeviceCredential).where(
+                        DeviceCredential.device_id == device.id,
+                        DeviceCredential.enabled.is_(True),
+                    )
+                ).all()
+            )
+            item["recent_requests"] = [
+                {
+                    "tool": row.skill,
+                    "status": row.response_status,
+                    "timestamp": row.timestamp,
+                    "duration_ms": row.duration_ms,
+                    "error_code": row.error_code,
+                }
+                for row in s.scalars(
+                    select(DeviceAudit)
+                    .where(DeviceAudit.device_id == device.id)
+                    .order_by(DeviceAudit.timestamp.desc())
+                    .limit(5)
+                ).all()
+            ]
+            result.append(item)
+        return result
+
+
+@app.patch("/api/devices/{device_id}", dependencies=[Depends(auth)])
+async def update_device(device_id: str, item: DeviceUpdate):
+    with store.Session() as session:
+        device = session.get(Device, device_id)
+        if not device:
+            raise HTTPException(404, "Device not found")
+        if item.name is not None:
+            device.name = sanitize(item.name, 80).strip()
+        if item.enabled is not None:
+            device.enabled = item.enabled
+            device.connection_state = "disabled" if not item.enabled else "unknown"
+        device.updated_at = utcnow()
+        session.commit()
+    if item.enabled is False:
+        revoke_device_tokens(store, device_id)
+    return {"status": "updated", "device_id": device_id}
+
+
+@app.post("/api/devices/{device_id}/rotate-token", dependencies=[Depends(auth)])
+async def rotate_device_token(device_id: str):
+    with store.Session() as session:
+        device = session.get(Device, device_id)
+        if not device or not device.enabled:
+            raise HTTPException(404, "Enabled device not found")
+    revoke_device_tokens(store, device_id)
+    token = issue_device_token(store, device_id)
+    return {
+        "status": "rotated",
+        "device_id": device_id,
+        "token": token,
+        "notice": "Shown once. Update the device provider now; Jarvis stores only its hash.",
+    }
+
+
+@app.get("/api/devices/{device_id}/gateway-test", dependencies=[Depends(auth)])
+async def device_gateway_test(device_id: str):
+    with store.Session() as session:
+        device = session.get(Device, device_id)
+        if not device:
+            raise HTTPException(404, "Device not found")
+        credentials = session.scalars(
+            select(DeviceCredential).where(
+                DeviceCredential.device_id == device_id,
+                DeviceCredential.enabled.is_(True),
+            )
+        ).all()
+        tools = session.scalars(
+            select(DeviceToolPermission).where(
+                DeviceToolPermission.device_id == device_id,
+                DeviceToolPermission.enabled.is_(True),
+            )
+        ).all()
+    checks = {
+        "registered": True,
+        "enabled": device.enabled,
+        "credentialConfigured": bool(credentials),
+        "toolRegistryConfigured": bool(tools),
+        "gatewayProcessReachable": False,
+        "physicalRoundTripVerified": False,
+    }
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(cfg.device_gateway_host, cfg.device_gateway_port),
+            timeout=1,
+        )
+        checks["gatewayProcessReachable"] = True
+        writer.close()
+        await writer.wait_closed()
+    except (OSError, TimeoutError):
+        pass
+    software_checks = {
+        k: v for k, v in checks.items() if k != "physicalRoundTripVerified"
+    }
+    return {
+        "status": "pass" if all(software_checks.values()) else "partial",
+        "checks": checks,
+        "notice": "This is a gateway configuration test, not a physical speaker round trip.",
+    }
 
 
 @app.get("/api/events")
