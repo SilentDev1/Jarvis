@@ -12,6 +12,7 @@
 <section class="card" style="margin-top:16px"><div class="label">Known People · Local identity hints</div><small>Face templates stay on this Jarvis device. A match never unlocks a door or proves identity.</small><div id="knownList"></div></section>
 <section class="grid" id="devices"><div class="card"><div class="label">Tapo C101</div><p>Camera · Front Door</p><strong id="tapo">Configured</strong></div><div class="card"><div class="label">AiPi</div><p>Voice Satellite · Front Door</p><strong class="warn">Waiting for hardware</strong></div></section></main>
 <script>
+localStorage.removeItem('jarvisToken');
 let sid=null,zones={observation:[],approach:[],interaction:[]};
 function showLogin(){loginOverlay.classList.add('show');loginUsername.focus()}
 async function login(event){event.preventDefault();loginError.textContent='';let r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:loginUsername.value,password:loginPassword.value})});if(!r.ok){loginError.textContent='Incorrect username or password';return}loginPassword.value='';loginOverlay.classList.remove('show');refresh()}
