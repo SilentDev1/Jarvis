@@ -40,11 +40,26 @@ class AIProvider(ABC):
     async def health(self) -> dict: ...
 
 
-class VoiceSatellite(ABC):
+class VoiceTerminalProvider(ABC):
     @abstractmethod
     async def speak(self, text: str) -> None: ...
+
+    @abstractmethod
+    async def start_listening(self) -> None: ...
+
+    @abstractmethod
+    async def stop_listening(self) -> None: ...
+
+    @abstractmethod
+    def is_available(self) -> bool: ...
+
     @abstractmethod
     def health(self) -> dict: ...
+
+
+# Compatibility name for integrations that still describe this boundary as a
+# satellite. New code should use VoiceTerminalProvider.
+VoiceSatellite = VoiceTerminalProvider
 
 
 class NotificationProvider(ABC):

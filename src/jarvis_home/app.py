@@ -31,6 +31,7 @@ from .integrations.providers import (
     MockVision,
     OllamaAI,
     SimulatorVoice,
+    StockAiPiVoice,
     TapoCamera,
     TestCamera,
     YoloVision,
@@ -58,6 +59,10 @@ from .modules.front_door.recognition import OpenCVFaceRecognition
 from .modules.front_door.state import VisitorStateMachine
 from .modules.front_door.tracking import CentroidTracker
 from .modules.front_door.visitor_media import VisitorMediaService
+from .modules.front_door.voice_terminal import (
+    VisitorGreetingPolicy,
+    VoiceTerminalService,
+)
 from .modules.front_door.zones import classify, parse_polygon
 from .persistence import (
     Badge,
@@ -99,7 +104,15 @@ try:
 except Exception:  # noqa: BLE001 - optional provider import/model failures must degrade safely
     vision = MockVision()
 ai = OllamaAI(cfg.ollama_url, cfg.ollama_model)
-voice = SimulatorVoice()
+voice = StockAiPiVoice() if cfg.voice_satellite == "aipi_stock" else SimulatorVoice()
+voice_service = VoiceTerminalService(
+    voice,
+    bus,
+    cfg.visitor_listen_timeout_seconds,
+    cfg.visitor_conversation_max_seconds,
+    cfg.visitor_conversation_max_turns,
+)
+greeting_policy = VisitorGreetingPolicy(cfg.personalize_known_visitor_greeting)
 notifier = LogNotification(bus)
 try:
     face_recognition = (
@@ -423,22 +436,21 @@ async def create_visitor_session(sid: str):
         if recognized_name:
             state.known_person_name = recognized_name
             state.face_match_status = "KNOWN_HIGH_CONFIDENCE"
-    greeting = (
-        f"Hi {recognized_name}. How can I help you?"
-        if recognized_name
-        else "Hello. How can I help you?"
-    )
-    state.turns.append({"role": "assistant", "content": greeting})
-    await voice.speak(greeting)
-    with store.Session() as s:
-        s.add(
-            ConversationTurn(
-                session_id=sid, role="assistant", text=greeting, timestamp=utcnow()
+    greeting = greeting_policy.greeting(recognized_name)
+    delivered = await voice_service.begin(sid, greeting)
+    if delivered:
+        state.turns.append({"role": "assistant", "content": greeting})
+        with store.Session() as s:
+            s.add(
+                ConversationTurn(
+                    session_id=sid,
+                    role="assistant",
+                    text=greeting,
+                    timestamp=utcnow(),
+                )
             )
-        )
-        s.commit()
-    bus.publish("visitor.session_started", {"session_id": sid})
-    bus.publish("jarvis.greeting", {"session_id": sid, "text": greeting})
+            s.commit()
+        bus.publish("jarvis.greeting", {"session_id": sid, "text": greeting})
     return state
 
 
@@ -619,6 +631,7 @@ async def live_vision_loop():
                     and transition.session_id in sessions
                 ):
                     await complete_session(transition.session_id)
+            await voice_service.expire(time.monotonic())
             elapsed = time.monotonic() - window_started
             if elapsed >= 5:
                 metrics["vision_fps"] = round(window_inferences / elapsed, 2)
@@ -640,6 +653,7 @@ async def complete_session(sid: str):
     if not state:
         return
     state.status = "complete"
+    await voice_service.end(sid, "visitor_departed")
     with store.Session() as s:
         db = s.get(VisitorSession, sid)
         if db:
@@ -672,6 +686,15 @@ async def media_cleanup_loop():
         await asyncio.sleep(6 * 60 * 60)
 
 
+async def voice_session_watchdog():
+    while True:
+        try:
+            await voice_service.expire(time.monotonic())
+        except Exception:
+            logger.exception("Voice session watchdog failed")
+        await asyncio.sleep(1)
+
+
 @asynccontextmanager
 async def lifespan(app):
     setup_logging()
@@ -679,10 +702,14 @@ async def lifespan(app):
     bus.publish("system.started", {"version": "0.1.0"})
     vision_task = asyncio.create_task(live_vision_loop())
     cleanup_task = asyncio.create_task(media_cleanup_loop())
+    voice_task = asyncio.create_task(voice_session_watchdog())
     yield
     vision_task.cancel()
     cleanup_task.cancel()
-    await asyncio.gather(vision_task, cleanup_task, return_exceptions=True)
+    voice_task.cancel()
+    await asyncio.gather(
+        vision_task, cleanup_task, voice_task, return_exceptions=True
+    )
     bus.publish("system.stopped")
 
 
@@ -1239,6 +1266,9 @@ async def front_door():
         "active_session": sessions.get(machine.session_id).public()
         if machine.session_id in sessions
         else None,
+        "voice_conversation": voice_service.active.public()
+        if voice_service.active
+        else None,
     }
 
 
@@ -1253,7 +1283,10 @@ async def sim_start():
     state = await create_visitor_session(sid)
     return {
         "session_id": sid,
-        "reply": state.turns[-1]["content"],
+        "reply": state.turns[-1]["content"] if state.turns else None,
+        "voice_delivery": voice_service.active.phase
+        if voice_service.active
+        else "unavailable",
         "state": state.public(),
     }
 
@@ -1267,6 +1300,7 @@ async def sim_say(sid: str, item: VisitorInput):
     if not is_meaningful_utterance(text):
         bus.publish("voice.input_ignored", {"reason": "empty_or_noise_only"})
         return Response(status_code=204)
+    voice_service.begin_processing(sid)
     state.turns.append({"role": "user", "content": text})
     bus.publish("visitor.spoke", {"session_id": sid, "text": text})
     t0 = time.perf_counter()
@@ -1285,7 +1319,7 @@ async def sim_say(sid: str, item: VisitorInput):
         300,
     )
     state.turns.append({"role": "assistant", "content": reply})
-    await voice.speak(reply)
+    await voice_service.respond(sid, reply)
     if result["action"] == "request_badge":
         machine.request_badge()
         bus.publish("visitor.badge_requested", {"session_id": sid})

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     presence_freshness_seconds: float = Field(3, ge=1, le=15)
     presence_hold_seconds: float = Field(2.5, ge=0, le=10)
     voice_satellite: str = "simulator"
+    visitor_listen_timeout_seconds: float = Field(15, ge=3, le=120)
+    visitor_conversation_max_seconds: float = Field(120, ge=15, le=600)
+    visitor_conversation_max_turns: int = Field(8, ge=1, le=20)
+    personalize_known_visitor_greeting: bool = False
     ai_provider: str = "ollama"
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:4b"
@@ -67,6 +71,13 @@ class Settings(BaseSettings):
     def camera_mode_ok(cls, v):
         if v not in {"live", "test"}:
             raise ValueError("CAMERA_MODE must be live or test")
+        return v
+
+    @field_validator("voice_satellite")
+    @classmethod
+    def voice_satellite_ok(cls, v):
+        if v not in {"simulator", "aipi_stock"}:
+            raise ValueError("VOICE_SATELLITE must be simulator or aipi_stock")
         return v
 
     @field_validator(

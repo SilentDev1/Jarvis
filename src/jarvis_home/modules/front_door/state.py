@@ -39,6 +39,7 @@ class VisitorStateMachine:
         if not keep_phase:
             self.phase = Phase.EMPTY
         self.first_seen = self.last_seen = self.started = None
+        self.interaction_since = None
         self.session_id = None
         self.greeted = False
 
@@ -58,17 +59,21 @@ class VisitorStateMachine:
         if self.first_seen is None:
             self.first_seen = now
         if zone == "observation":
+            self.interaction_since = None
             self.phase = Phase.PERSON_DETECTED
         elif zone == "approach":
+            self.interaction_since = None
             self.phase = Phase.APPROACHING
         elif zone == "interaction":
+            if self.interaction_since is None:
+                self.interaction_since = now
             if not self.session_id:
                 if now - self.last_completed < self.cooldown:
                     self.phase = Phase.WAITING
                     return Transition(self.phase)
                 self.session_id = str(uuid.uuid4())
                 self.started = now
-            if now - self.first_seen < self.dwell:
+            if now - self.interaction_since < self.dwell:
                 self.phase = Phase.DWELLING
             elif not self.greeted and now - self.last_completed >= self.cooldown:
                 self.greeted = True

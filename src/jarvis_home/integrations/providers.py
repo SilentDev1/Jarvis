@@ -11,7 +11,7 @@ from ..core.providers import (
     Frame,
     NotificationProvider,
     VisionProvider,
-    VoiceSatellite,
+    VoiceTerminalProvider,
 )
 
 
@@ -189,18 +189,59 @@ class OllamaAI(AIProvider):
         return json.loads(r.json()["message"]["content"])
 
 
-class SimulatorVoice(VoiceSatellite):
+class SimulatorVoice(VoiceTerminalProvider):
     def __init__(self):
         self.last_spoken = ""
+        self.state = "standby"
 
     async def speak(self, text):
+        self.state = "speaking"
         self.last_spoken = text
+
+    async def start_listening(self):
+        self.state = "listening"
+
+    async def stop_listening(self):
+        self.state = "standby"
+
+    def is_available(self):
+        return True
 
     def health(self):
         return {
             "status": "ready",
             "provider": "simulator",
+            "state": self.state,
             "last_spoken": self.last_spoken,
+        }
+
+
+class StockAiPiVoice(VoiceTerminalProvider):
+    """Fail-closed boundary for stock firmware without reverse device control."""
+
+    async def speak(self, text):
+        raise RuntimeError("Stock AiPi 1.2.5 has no server-initiated TTS API")
+
+    async def start_listening(self):
+        raise RuntimeError("Stock AiPi 1.2.5 has no remote listen-start API")
+
+    async def stop_listening(self):
+        # There is no remote state control. This is intentionally a no-op so
+        # cleanup remains safe when a greeting attempt fails before activation.
+        return None
+
+    def is_available(self):
+        return False
+
+    def health(self):
+        return {
+            "status": "unsupported",
+            "provider": "aipi_stock",
+            "state": "unknown",
+            "server_initiated_speech": False,
+            "remote_wake": False,
+            "remote_listen_start": False,
+            "firmware_verified": "1.2.5",
         }
 
 

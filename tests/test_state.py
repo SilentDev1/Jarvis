@@ -15,6 +15,24 @@ def test_dwell_and_one_greeting():
     assert not m.update("interaction", 3).event
 
 
+def test_approach_time_does_not_count_as_interaction_dwell():
+    m = VisitorStateMachine(dwell=2)
+    m.update("observation", 0)
+    m.update("approach", 5)
+    assert not m.update("interaction", 10).event
+    assert m.phase == Phase.DWELLING
+    assert m.update("interaction", 12.1).event == "visitor.session_started"
+
+
+def test_leaving_interaction_resets_confirmation_window():
+    m = VisitorStateMachine(dwell=2)
+    m.update("interaction", 0)
+    m.update("approach", 1)
+    assert not m.update("interaction", 2).event
+    assert not m.update("interaction", 3).event
+    assert m.update("interaction", 4.1).event == "visitor.session_started"
+
+
 def test_disappearance_grace_reuses_session():
     m = VisitorStateMachine(dwell=1, grace=3)
     m.update("interaction", 0)
@@ -32,6 +50,17 @@ def test_leave_and_cooldown():
     transition = m.update("interaction", 6)
     assert not transition.event
     assert transition.session_id is None
+
+
+def test_genuine_return_after_cooldown_gets_new_session():
+    m = VisitorStateMachine(dwell=1, grace=1, cooldown=2)
+    m.update("interaction", 0)
+    first = m.update("interaction", 1.1).session_id
+    m.update(None, 3)
+    m.update("interaction", 5.1)
+    returned = m.update("interaction", 6.2)
+    assert returned.event == "visitor.session_started"
+    assert returned.session_id != first
 
 
 def test_timeout():

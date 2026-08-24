@@ -16,3 +16,5 @@ packages=["src/jarvis_home"]
 [tool.pytest.ini_options]
 pythonpath=["src"]
 testpaths=["tests"]
+[tool.mypy]
+ignore_missing_imports=true

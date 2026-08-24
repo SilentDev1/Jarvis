@@ -65,8 +65,11 @@ four seconds reuses the authorized structured result but returns an empty
 and normal requests work again after the window. This does not replace the
 recommended second button press or prove physical echo cancellation.
 
-Unsolicited front-door event speech remains disabled. A future proactive alert
-path must be a separate event -> notification policy -> permitted device design.
+Camera-triggered visitor greeting requests now use a separate event-driven
+`VoiceTerminalService`. On the stock provider they fail closed and emit an audit
+event because firmware 1.2.5 has no supported reverse-control API. This is not
+reported as delivered speech. See `AIPI_PROACTIVE_VOICE.md` for the capability
+audit, provider contract, and non-flashing fallback plan.
 
 ## Physical acceptance tests
 
