@@ -12,7 +12,7 @@ cd /Users/silentd3v/Documents/SilentDev-Workspace/jarvis-home
 ./scripts/start.sh
 ```
 
-Open <http://127.0.0.1:8765>. The dashboard asks for the admin token when a protected simulator action is first used. Test mode needs no camera: click **Start Visitor**, type visitor speech, and continue a multi-turn conversation. Stop with `./scripts/stop.sh`.
+Open <http://127.0.0.1:8765>. Sign in with `JARVIS_ADMIN_USERNAME` and `JARVIS_ADMIN_PASSWORD`; the browser cookie keeps the dashboard signed in for the configured session period. `JARVIS_ADMIN_TOKEN` remains available for scripts and API clients. Test mode needs no camera: click **Start Visitor**, type visitor speech, and continue a multi-turn conversation. Stop with `./scripts/stop.sh`.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Jarvis uses `KNOWN_HIGH_CONFIDENCE`, `POSSIBLE_MATCH`, `UNKNOWN`, and `INSUFFICI
 
 ## Privacy and security defaults
 
-Event snapshots and transcripts are enabled; raw audio is disabled. The local face provider can be ready, but visitor matching remains dormant until a homeowner explicitly enrolls a person. Jarvis never unlocks doors or exposes household state. Speech/OCR are untrusted; tools are allowlisted and no shell tool exists. The server binds to localhost by default and mutating or biometric endpoints require `X-Jarvis-Token`.
+Event snapshots and transcripts are enabled; raw audio is disabled. The local face provider can be ready, but visitor matching remains dormant until a homeowner explicitly enrolls a person. Jarvis never unlocks doors or exposes household state. Speech/OCR are untrusted; tools are allowlisted and no shell tool exists. The server binds to localhost by default; protected endpoints accept the signed dashboard session cookie or `X-Jarvis-Token` for automation clients.
 
 ## Deployment
 

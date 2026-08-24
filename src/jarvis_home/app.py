@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import logging.handlers
@@ -10,8 +13,8 @@ from pathlib import Path
 
 import numpy as np
 import psutil
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -163,13 +166,45 @@ def persist_event(event):
 bus.subscribe(persist_event)
 
 
-async def auth(x_jarvis_token: str | None = Header(None)):
-    if not secrets.compare_digest(x_jarvis_token or "", cfg.jarvis_admin_token):
-        raise HTTPException(401, "Valid X-Jarvis-Token required")
+def create_session_cookie(expires_at: int) -> str:
+    payload = f"{cfg.jarvis_admin_username}:{expires_at}"
+    signature = hmac.new(
+        cfg.jarvis_admin_token.encode(), payload.encode(), hashlib.sha256
+    ).digest()
+    encoded = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    return f"{expires_at}.{encoded}"
+
+
+def valid_session_cookie(value: str | None, now: int | None = None) -> bool:
+    if not value:
+        return False
+    try:
+        expires_text, supplied = value.split(".", 1)
+        expires_at = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    if expires_at < (now if now is not None else int(time.time())):
+        return False
+    expected = create_session_cookie(expires_at).split(".", 1)[1]
+    return secrets.compare_digest(supplied, expected)
+
+
+async def auth(
+    x_jarvis_token: str | None = Header(None),
+    jarvis_session: str | None = Cookie(None),
+):
+    token_ok = secrets.compare_digest(x_jarvis_token or "", cfg.jarvis_admin_token)
+    if not token_ok and not valid_session_cookie(jarvis_session):
+        raise HTTPException(401, "Admin login required")
 
 
 class VisitorInput(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
+
+
+class LoginInput(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
 
 
 class ZoneEvent(BaseModel):
@@ -536,6 +571,46 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Jarvis Home", version="0.1.0", lifespan=lifespan)
+
+
+@app.post("/api/auth/login")
+async def login(item: LoginInput):
+    username_ok = secrets.compare_digest(item.username, cfg.jarvis_admin_username)
+    password_ok = secrets.compare_digest(item.password, cfg.jarvis_admin_password)
+    if not username_ok or not password_ok:
+        raise HTTPException(401, "Incorrect username or password")
+    max_age = cfg.admin_session_days * 24 * 60 * 60
+    expires_at = int(time.time()) + max_age
+    response = JSONResponse(
+        {"status": "authenticated", "username": cfg.jarvis_admin_username}
+    )
+    response.set_cookie(
+        "jarvis_session",
+        create_session_cookie(expires_at),
+        max_age=max_age,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    response = JSONResponse({"status": "signed_out"})
+    response.delete_cookie("jarvis_session", path="/", samesite="strict")
+    return response
+
+
+@app.get("/api/auth/session")
+async def auth_session(jarvis_session: str | None = Cookie(None)):
+    return {
+        "authenticated": valid_session_cookie(jarvis_session),
+        "username": cfg.jarvis_admin_username
+        if valid_session_cookie(jarvis_session)
+        else None,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

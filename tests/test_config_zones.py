@@ -29,3 +29,4 @@ def test_rtsp_credential_encoding_and_masking():
     assert s.public()["camera_password"] == "***"
     assert s.public()["camera_host"] == "***"
     assert s.public()["camera_username"] == "***"
+    assert s.public()["jarvis_admin_password"] == "***"

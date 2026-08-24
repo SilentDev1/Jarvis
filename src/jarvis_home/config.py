@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     jarvis_host: str = "127.0.0.1"
     jarvis_port: int = 8765
     jarvis_admin_token: str = Field("change-this-to-a-long-random-value", min_length=12)
+    jarvis_admin_username: str = Field("admin", min_length=1, max_length=80)
+    jarvis_admin_password: str = Field("change-this-password", min_length=8)
+    admin_session_days: int = Field(30, ge=1, le=365)
     data_dir: Path = Path("./data")
     log_dir: Path = Path("./logs")
     camera_mode: str = "test"
@@ -79,6 +82,7 @@ class Settings(BaseSettings):
             "camera_username",
             "camera_password",
             "jarvis_admin_token",
+            "jarvis_admin_password",
         ):
             d[k] = "***" if d[k] else ""
         for k in ("camera_rtsp_url_main", "camera_rtsp_url_sub"):
