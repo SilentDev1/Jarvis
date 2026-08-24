@@ -211,5 +211,5 @@ class LogNotification(NotificationProvider):
     async def send(self, title, body, image_path=None):
         self.bus.publish(
             "notification.sent",
-            {"title": title, "body": body, "image_path": image_path},
+            {"title": title, "body": body, "image_attached": bool(image_path)},
         )

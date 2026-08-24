@@ -28,8 +28,10 @@ def test_leave_and_cooldown():
     m.update("interaction", 0)
     m.update("interaction", 1.1)
     assert m.update(None, 3).event == "visitor.departed"
-    m.update("interaction", 4)
-    assert not m.update("interaction", 6).event
+    assert m.update("interaction", 4).session_id is None
+    transition = m.update("interaction", 6)
+    assert not transition.event
+    assert transition.session_id is None
 
 
 def test_timeout():

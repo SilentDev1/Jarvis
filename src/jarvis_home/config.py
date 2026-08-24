@@ -51,10 +51,14 @@ class Settings(BaseSettings):
     record_audio: bool = False
     face_recognition: bool = False
     face_detection_model: Path = Path("./data/models/face_detection_yunet_2026may.onnx")
-    face_recognition_model: Path = Path("./data/models/face_recognition_sface_2021dec.onnx")
+    face_recognition_model: Path = Path(
+        "./data/models/face_recognition_sface_2021dec.onnx"
+    )
     face_recognition_threshold: float = Field(0.45, ge=0.2, le=0.9)
     face_possible_threshold: float = Field(0.36, ge=0.1, le=0.8)
     media_retention_days: int = Field(30, ge=1, le=3650)
+    unknown_visitor_media_retention_days: int = Field(7, ge=1, le=365)
+    visitor_candidate_interval_seconds: float = Field(1.5, ge=0.5, le=10)
     notification_provider: str = "log"
     ha_mqtt_enabled: bool = False
 
@@ -65,7 +69,9 @@ class Settings(BaseSettings):
             raise ValueError("CAMERA_MODE must be live or test")
         return v
 
-    @field_validator("data_dir", "log_dir", "face_detection_model", "face_recognition_model")
+    @field_validator(
+        "data_dir", "log_dir", "face_detection_model", "face_recognition_model"
+    )
     @classmethod
     def portable_path(cls, v):
         v = Path(v)

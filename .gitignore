@@ -9,6 +9,7 @@ data/zones.json
 data/media/*
 !data/media/.gitkeep
 data/models/
+data/faces/
 *.pt
 logs/*
 !logs/.gitkeep

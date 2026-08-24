@@ -59,6 +59,11 @@ or tool routing. XDC MCP calls contain only a selected tool call—no transcript
 VAD confidence, or activation metadata—so Jarvis cannot independently reject a
 plausible transcript invented upstream. MCP tools are passive request/response
 handlers and contain no scheduler, event subscription, or speech initiation.
+As a bounded self-hearing mitigation, an identical device/tool request within
+four seconds reuses the authorized structured result but returns an empty
+`speech` field and does not call Core again. Different tools remain available,
+and normal requests work again after the window. This does not replace the
+recommended second button press or prove physical echo cancellation.
 
 Unsolicited front-door event speech remains disabled. A future proactive alert
 path must be a separate event -> notification policy -> permitted device design.

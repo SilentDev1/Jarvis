@@ -129,8 +129,15 @@ async def invoke(tool_name: str, skill) -> dict:
             "speech": "This device is not permitted to use that capability.",
             "status": "forbidden",
         }
+    elif not duplicate_guard.allow(device.id, tool_name):
+        result = {
+            **duplicate_results.get((device.id, tool_name), {"ok": True}),
+            "speech": "",
+            "status": "duplicate_suppressed",
+        }
     else:
         result = await skill.invoke()
+        duplicate_results[(device.id, tool_name)] = dict(result)
     audit(device.id, tool_name, result, (time.monotonic() - started) * 1000)
     return result
 
@@ -179,6 +186,23 @@ class DeviceRateLimiter:
             return False
         bucket.append(now)
         return True
+
+
+class DuplicateRequestGuard:
+    def __init__(self, window_seconds=4):
+        self.window_seconds = window_seconds
+        self.last_request = {}
+
+    def allow(self, device_id: str, tool_name: str, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        key = (device_id, tool_name)
+        previous = self.last_request.get(key)
+        self.last_request[key] = now
+        return previous is None or now - previous >= self.window_seconds
+
+
+duplicate_guard = DuplicateRequestGuard()
+duplicate_results: dict[tuple[str, str], dict] = {}
 
 
 class DeviceAuthMiddleware:
@@ -256,7 +280,7 @@ class DeviceAuthMiddleware:
             current_device.reset(marker)
 
 
-allowed_hosts = []
+allowed_hosts: list[str] = []
 for configured_host in cfg.mcp_allowed_hosts.split(","):
     configured_host = configured_host.strip()
     if configured_host:

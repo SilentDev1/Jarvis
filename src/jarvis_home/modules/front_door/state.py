@@ -63,6 +63,9 @@ class VisitorStateMachine:
             self.phase = Phase.APPROACHING
         elif zone == "interaction":
             if not self.session_id:
+                if now - self.last_completed < self.cooldown:
+                    self.phase = Phase.WAITING
+                    return Transition(self.phase)
                 self.session_id = str(uuid.uuid4())
                 self.started = now
             if now - self.first_seen < self.dwell:

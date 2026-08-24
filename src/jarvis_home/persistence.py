@@ -95,12 +95,43 @@ class KnownPerson(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     display_name: Mapped[str] = mapped_column(String)
     category: Mapped[str | None] = mapped_column(String, nullable=True)
+    organization: Mapped[str | None] = mapped_column(String, nullable=True)
+    relationship: Mapped[str | None] = mapped_column(String, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     face_data_path: Mapped[str | None] = mapped_column(String, nullable=True)
     source_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String)
     last_seen: Mapped[str | None] = mapped_column(String, nullable=True)
     match_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class VisitorMedia(Base):
+    __tablename__ = "visitor_media"
+    __table_args__ = (UniqueConstraint("visitor_id", "media_type"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    visitor_id: Mapped[str] = mapped_column(ForeignKey("visitor_sessions.id"))
+    media_type: Mapped[str] = mapped_column(String)
+    path: Mapped[str] = mapped_column(String)
+    captured_at: Mapped[str] = mapped_column(String)
+    person_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    face_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quality_score: Mapped[float] = mapped_column(Float, default=0)
+    ambiguous: Mapped[bool] = mapped_column(Boolean, default=False)
+    retained: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[str] = mapped_column(String)
+
+
+class FaceSample(Base):
+    __tablename__ = "face_samples"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    known_person_id: Mapped[int] = mapped_column(ForeignKey("known_people.id"))
+    source_visitor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    image_path: Mapped[str] = mapped_column(String)
+    embedding_path: Mapped[str] = mapped_column(String)
+    quality_score: Mapped[float] = mapped_column(Float, default=0)
+    created_at: Mapped[str] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Notification(Base):
@@ -240,6 +271,9 @@ class Store:
                 "created_at": "VARCHAR",
                 "last_seen": "VARCHAR",
                 "match_count": "INTEGER DEFAULT 0",
+                "organization": "VARCHAR",
+                "relationship": "VARCHAR",
+                "notes": "TEXT",
             },
         }
         with self.engine.begin() as connection:

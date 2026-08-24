@@ -11,11 +11,12 @@ import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import psutil
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -41,6 +42,11 @@ from .modules.front_door.conversation import (
     deterministic_reply,
     enforce_policy,
 )
+from .modules.front_door.known_people import (
+    AmbiguousEnrollmentError,
+    EnrollmentError,
+    KnownPersonService,
+)
 from .modules.front_door.media import (
     capture_burst,
     run_ocr,
@@ -51,6 +57,7 @@ from .modules.front_door.presence import PresenceTracker
 from .modules.front_door.recognition import OpenCVFaceRecognition
 from .modules.front_door.state import VisitorStateMachine
 from .modules.front_door.tracking import CentroidTracker
+from .modules.front_door.visitor_media import VisitorMediaService
 from .modules.front_door.zones import classify, parse_polygon
 from .persistence import (
     Badge,
@@ -59,10 +66,11 @@ from .persistence import (
     DeviceAudit,
     DeviceCredential,
     DeviceToolPermission,
+    FaceSample,
     FrontDoorEvent,
-    Image,
     KnownPerson,
     Store,
+    VisitorMedia,
     VisitorSession,
     utcnow,
 )
@@ -106,6 +114,11 @@ try:
     )
 except (FileNotFoundError, ImportError, AttributeError):
     face_recognition = None
+visitor_media = VisitorMediaService(store, cfg.data_dir, face_recognition)
+known_people_service = KnownPersonService(
+    store, cfg.data_dir, face_recognition, visitor_media
+)
+last_media_candidate_at: dict[str, float] = {}
 sessions: dict[str, ConversationState] = {}
 tracker = CentroidTracker(
     max_missed=max(3, round(cfg.disappear_grace_seconds * cfg.detection_fps))
@@ -113,7 +126,7 @@ tracker = CentroidTracker(
 presence_tracker = PresenceTracker(cfg.presence_hold_seconds)
 vision_lock = asyncio.Lock()
 started = time.time()
-metrics = {
+metrics: dict[str, Any] = {
     "frames": 0,
     "detections": 0,
     "vision_fps": 0.0,
@@ -277,6 +290,9 @@ class KnownPersonEnrollment(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     session_id: str = Field(min_length=1, max_length=100)
     category: str | None = Field(default=None, max_length=40)
+    organization: str | None = Field(default=None, max_length=100)
+    relationship: str | None = Field(default=None, max_length=80)
+    notes: str | None = Field(default=None, max_length=500)
 
 
 class KnownPersonUpdate(BaseModel):
@@ -296,18 +312,31 @@ def media_path(relative_path: str | None) -> Path | None:
     return candidate if candidate.is_relative_to(root) else None
 
 
+def recognition_candidates(session):
+    candidates = []
+    sampled_people = set()
+    for sample in session.scalars(
+        select(FaceSample).where(FaceSample.enabled.is_(True))
+    ).all():
+        person = session.get(KnownPerson, sample.known_person_id)
+        path = media_path(sample.embedding_path)
+        if person and person.enabled and path and path.is_file():
+            candidates.append((person.id, person.display_name, path))
+            sampled_people.add(person.id)
+    for person in session.scalars(
+        select(KnownPerson).where(KnownPerson.enabled.is_(True))
+    ).all():
+        path = media_path(person.face_data_path)
+        if person.id not in sampled_people and path and path.is_file():
+            candidates.append((person.id, person.display_name, path))
+    return candidates
+
+
 async def recognize_visitor(sid: str, image) -> None:
     if face_recognition is None:
         return
     with store.Session() as s:
-        people = s.scalars(
-            select(KnownPerson).where(KnownPerson.enabled.is_(True))
-        ).all()
-        candidates = []
-        for person in people:
-            path = media_path(person.face_data_path)
-            if path:
-                candidates.append((person.id, person.display_name, path))
+        candidates = recognition_candidates(s)
     if not candidates:
         return
     started_at = time.perf_counter()
@@ -421,49 +450,25 @@ async def capture_visitor_photo(sid: str):
             {"component": "visitor_photo", "reason": "snapshot unavailable"},
         )
         return None
-    path = cfg.data_dir / "media" / sid / "visitor_full.jpg"
     try:
-        save_jpeg(frame.data, path)
-        crop_path = None
         tracks = metrics.get("tracks") or []
-        if tracks:
-            x1, y1, x2, y2 = tracks[0]["box"]
-            height, width = frame.data.shape[:2]
-            crop = frame.data[
-                max(0, int(y1 * height)) : min(height, int(y2 * height)),
-                max(0, int(x1 * width)) : min(width, int(x2 * width)),
-            ]
-            if crop.size:
-                crop_path = cfg.data_dir / "media" / sid / "visitor_crop.jpg"
-                save_jpeg(crop, crop_path)
-        with store.Session() as s:
-            db = s.get(VisitorSession, sid)
-            if db:
-                db.visitor_photo = str(path.relative_to(cfg.data_dir))
-            s.add(
-                Image(
-                    session_id=sid,
-                    kind="visitor_full",
-                    path=str(path.relative_to(cfg.data_dir)),
-                    timestamp=utcnow(),
-                )
-            )
-            if crop_path:
-                s.add(
-                    Image(
-                        session_id=sid,
-                        kind="visitor_crop",
-                        path=str(crop_path.relative_to(cfg.data_dir)),
-                        timestamp=utcnow(),
-                    )
-                )
-            s.commit()
+        result = await asyncio.to_thread(
+            visitor_media.capture_candidate,
+            sid,
+            frame.data,
+            max((track["confidence"] for track in tracks), default=None),
+            max(1, len(tracks)),
+        )
         bus.publish(
             "visitor.photo_captured",
-            {"session_id": sid, "path": str(path.relative_to(cfg.data_dir))},
+            {
+                "session_id": sid,
+                "face_detected": result["face_detected"],
+                "ambiguous": result["ambiguous"],
+            },
         )
         await recognize_visitor(sid, frame.data)
-        return path
+        return result
     except (OSError, ValueError):
         logger.exception("Visitor snapshot failed")
         return None
@@ -558,14 +563,13 @@ async def live_vision_loop():
             metrics["person_count"] = observation.person_count
             metrics["observed_at"] = observation.observed_at
             metrics["observation_source"] = observation.source
+            state_people = observation.detections
             zone = (
-                classify(max(people, key=lambda item: item.confidence).box, zones)
-                if people
+                classify(max(state_people, key=lambda item: item.confidence).box, zones)
+                if state_people
                 else None
             )
-            transition = machine.update(
-                zone if zones_configured else None, time.monotonic()
-            )
+            transition = machine.update(zone, time.monotonic())
             if people:
                 metrics["detections"] += 1
                 metrics["last_detection"] = time.time()
@@ -583,6 +587,24 @@ async def live_vision_loop():
                     bus.publish("person.detected", {"count": len(people), "zone": zone})
                 if zone != previous_zone:
                     bus.publish("person.entered_zone", {"zone": zone})
+                active_sid = machine.session_id
+                if (
+                    active_sid
+                    and active_sid in sessions
+                    and time.monotonic() - last_media_candidate_at.get(active_sid, 0)
+                    >= cfg.visitor_candidate_interval_seconds
+                ):
+                    last_media_candidate_at[active_sid] = time.monotonic()
+                    try:
+                        await asyncio.to_thread(
+                            visitor_media.capture_candidate,
+                            active_sid,
+                            frame.data,
+                            max(item.confidence for item in people),
+                            len(people),
+                        )
+                    except (OSError, ValueError):
+                        logger.exception("Visitor media candidate update failed")
             previous_present = bool(people)
             previous_zone = zone
             if transition.event:
@@ -637,15 +659,30 @@ async def complete_session(sid: str):
     bus.publish("session.completed", {"session_id": sid})
 
 
+async def media_cleanup_loop():
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                visitor_media.cleanup, cfg.unknown_visitor_media_retention_days
+            )
+            if result["rows"]:
+                bus.publish("visitor.media_cleanup", result)
+        except Exception:
+            logger.exception("Visitor media cleanup failed")
+        await asyncio.sleep(6 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app):
     setup_logging()
     store.init()
     bus.publish("system.started", {"version": "0.1.0"})
     vision_task = asyncio.create_task(live_vision_loop())
+    cleanup_task = asyncio.create_task(media_cleanup_loop())
     yield
     vision_task.cancel()
-    await asyncio.gather(vision_task, return_exceptions=True)
+    cleanup_task.cancel()
+    await asyncio.gather(vision_task, cleanup_task, return_exceptions=True)
     bus.publish("system.stopped")
 
 
@@ -890,22 +927,101 @@ async def device_gateway_test(device_id: str):
     }
 
 
-@app.get("/api/events")
+@app.get("/api/events", dependencies=[Depends(auth)])
 async def events(limit: int = 50):
     return [e.dict() for e in list(bus.history)[: min(limit, 200)]]
 
 
-@app.get("/api/visitors")
+@app.get("/api/visitors", dependencies=[Depends(auth)])
 async def visitors():
     with store.Session() as s:
-        return [
-            {c.name: getattr(v, c.name) for c in VisitorSession.__table__.columns}
-            for v in s.scalars(
-                select(VisitorSession)
-                .order_by(VisitorSession.arrival_time.desc())
-                .limit(100)
-            ).all()
-        ]
+        result = []
+        for visit in s.scalars(
+            select(VisitorSession)
+            .order_by(VisitorSession.arrival_time.desc())
+            .limit(100)
+        ).all():
+            media_types = {
+                row.media_type
+                for row in s.scalars(
+                    select(VisitorMedia).where(VisitorMedia.visitor_id == visit.id)
+                ).all()
+            }
+            result.append(
+                {
+                    "id": visit.id,
+                    "arrival_time": visit.arrival_time,
+                    "departure_time": visit.departure_time,
+                    "status": visit.status,
+                    "visitor_type": visit.visitor_type,
+                    "claimed_company": visit.claimed_company,
+                    "reason": visit.reason,
+                    "known_person_id": visit.known_person_id,
+                    "recognized_name": visit.recognized_name,
+                    "recognition_confidence": visit.recognition_confidence,
+                    "face_match_status": visit.face_match_status,
+                    "snapshot_available": "SNAPSHOT" in media_types,
+                    "face_available": "FACE_CROP" in media_types,
+                    "thumbnail_url": f"/api/visitors/{visit.id}/media/thumbnail"
+                    if media_types
+                    else None,
+                }
+            )
+        return result
+
+
+@app.get("/api/visitors/{visitor_id}/enrollment", dependencies=[Depends(auth)])
+async def visitor_enrollment_candidate(visitor_id: str):
+    candidate = visitor_media.candidate(visitor_id)
+    if candidate is None:
+        raise HTTPException(404, "Visitor not found")
+    candidate["snapshot_url"] = (
+        f"/api/visitors/{visitor_id}/media/snapshot"
+        if candidate["snapshot_available"]
+        else None
+    )
+    candidate["face_url"] = (
+        f"/api/visitors/{visitor_id}/media/face"
+        if candidate["face_available"]
+        else None
+    )
+    return candidate
+
+
+@app.get("/api/visitors/{visitor_id}/media/{kind}", dependencies=[Depends(auth)])
+async def visitor_media_file(visitor_id: str, kind: str):
+    media_type = {
+        "thumbnail": "FACE_CROP",
+        "face": "FACE_CROP",
+        "snapshot": "SNAPSHOT",
+    }.get(kind)
+    if media_type is None:
+        raise HTTPException(404, "Media type not found")
+    with store.Session() as session:
+        row = session.scalar(
+            select(VisitorMedia).where(
+                VisitorMedia.visitor_id == visitor_id,
+                VisitorMedia.media_type == media_type,
+            )
+        )
+        if row is None and kind == "thumbnail":
+            row = session.scalar(
+                select(VisitorMedia).where(
+                    VisitorMedia.visitor_id == visitor_id,
+                    VisitorMedia.media_type == "SNAPSHOT",
+                )
+            )
+    path = visitor_media.resolve(row.path if row else None)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "Visitor media not found")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/api/known-people", dependencies=[Depends(auth)])
@@ -916,6 +1032,9 @@ async def known_people():
                 "id": person.id,
                 "display_name": person.display_name,
                 "category": person.category,
+                "organization": person.organization,
+                "relationship": person.relationship,
+                "notes": person.notes,
                 "enabled": person.enabled,
                 "source_session_id": person.source_session_id,
                 "created_at": person.created_at,
@@ -935,42 +1054,34 @@ async def enroll_known_person(item: KnownPersonEnrollment):
     display_name = sanitize(item.display_name, 80).strip()
     if not display_name:
         raise HTTPException(422, "Display name is required")
-    with store.Session() as s:
-        visit = s.get(VisitorSession, item.session_id)
-        photo = media_path(visit.visitor_photo if visit else None)
-    if photo is None or not photo.is_file():
-        raise HTTPException(404, "Visitor photo not found")
-    import cv2
-
-    image = await asyncio.to_thread(cv2.imread, str(photo))
-    if image is None:
-        raise HTTPException(422, "Visitor photo could not be decoded")
-    embedding = await asyncio.to_thread(face_recognition.embedding, image)
-    if embedding is None:
-        raise HTTPException(422, "No clear face found in this visitor photo")
-    with store.Session() as s:
-        person = KnownPerson(
-            display_name=display_name,
-            category=sanitize(item.category, 40) if item.category else None,
-            enabled=True,
-            source_session_id=item.session_id,
-            created_at=utcnow(),
-            match_count=0,
+    try:
+        enrolled = await asyncio.to_thread(
+            known_people_service.enroll,
+            item.session_id,
+            display_name,
+            sanitize(item.organization, 100) if item.organization else None,
+            sanitize(item.relationship, 80) if item.relationship else None,
+            sanitize(item.notes, 500) if item.notes else None,
+            sanitize(item.category, 40) if item.category else None,
         )
-        s.add(person)
-        s.flush()
-        relative = Path("faces") / f"person_{person.id}.npy"
-        await asyncio.to_thread(
-            face_recognition.save_embedding, embedding, cfg.data_dir / relative
-        )
-        person.face_data_path = str(relative)
-        s.commit()
-        person_id = person.id
+    except AmbiguousEnrollmentError as error:
+        raise HTTPException(409, str(error)) from error
+    except EnrollmentError as error:
+        raise HTTPException(422, str(error)) from error
+    person_id = enrolled["id"]
+    if item.session_id in sessions:
+        sessions[item.session_id].known_person_name = display_name
+        sessions[item.session_id].face_match_status = "KNOWN_HIGH_CONFIDENCE"
     bus.publish(
         "known_person.enrolled",
         {"known_person_id": person_id, "display_name": display_name},
     )
-    return {"id": person_id, "display_name": display_name, "status": "enrolled"}
+    return {
+        "id": person_id,
+        "display_name": display_name,
+        "visitor_id": item.session_id,
+        "status": "enrolled",
+    }
 
 
 @app.patch("/api/known-people/{person_id}", dependencies=[Depends(auth)])
@@ -1008,14 +1119,7 @@ async def test_current_face():
             "retained": False,
         }
     with store.Session() as s:
-        people = s.scalars(
-            select(KnownPerson).where(KnownPerson.enabled.is_(True))
-        ).all()
-        candidates = [
-            (person.id, person.display_name, path)
-            for person in people
-            if (path := media_path(person.face_data_path)) is not None
-        ]
+        candidates = recognition_candidates(s)
     match = await asyncio.to_thread(face_recognition.match, embedding, candidates)
     return {
         "face_detected": True,
@@ -1035,6 +1139,23 @@ async def delete_known_person(person_id: int):
         if person is None:
             raise HTTPException(404, "Known person not found")
         embedding_path = media_path(person.face_data_path)
+        samples = s.scalars(
+            select(FaceSample).where(FaceSample.known_person_id == person_id)
+        ).all()
+        sample_paths = [media_path(sample.embedding_path) for sample in samples]
+        source_visitors = {
+            sample.source_visitor_id for sample in samples if sample.source_visitor_id
+        }
+        for sample in samples:
+            s.delete(sample)
+        for row in (
+            s.scalars(
+                select(VisitorMedia).where(VisitorMedia.visitor_id.in_(source_visitors))
+            ).all()
+            if source_visitors
+            else []
+        ):
+            row.retained = False
         for visit in s.scalars(
             select(VisitorSession).where(VisitorSession.known_person_id == person_id)
         ).all():
@@ -1046,6 +1167,9 @@ async def delete_known_person(person_id: int):
         s.commit()
     if embedding_path and embedding_path.is_file():
         embedding_path.unlink()
+    for sample_path in sample_paths:
+        if sample_path and sample_path.is_file() and sample_path != embedding_path:
+            sample_path.unlink()
     bus.publish("known_person.deleted", {"known_person_id": person_id})
     return {"id": person_id, "display_name": name, "status": "deleted"}
 
@@ -1209,7 +1333,7 @@ async def sim_end(sid: str):
     return {"status": "complete"}
 
 
-@app.get("/api/front-door/preview.jpg")
+@app.get("/api/front-door/preview.jpg", dependencies=[Depends(auth)])
 async def camera_preview():
     image = getattr(camera, "last_image", None)
     if image is None:

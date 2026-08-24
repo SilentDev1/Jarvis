@@ -13,7 +13,11 @@ from jarvis_home.devices.auth import (
     issue_device_token,
     revoke_device_tokens,
 )
-from jarvis_home.devices.mcp_gateway import DeviceAuthMiddleware, DeviceRateLimiter
+from jarvis_home.devices.mcp_gateway import (
+    DeviceAuthMiddleware,
+    DeviceRateLimiter,
+    DuplicateRequestGuard,
+)
 from jarvis_home.devices.skills import (
     FrontDoorRecentSkill,
     FrontDoorStatusSkill,
@@ -87,6 +91,14 @@ def test_rate_limiter_is_bounded_and_recovers():
     assert limiter.allow("device", now=1)
     assert not limiter.allow("device", now=2)
     assert limiter.allow("device", now=11)
+
+
+def test_duplicate_tool_request_is_suppressed_but_other_tool_is_allowed():
+    guard = DuplicateRequestGuard(window_seconds=4)
+    assert guard.allow("device", "jarvis.status", now=10)
+    assert not guard.allow("device", "jarvis.status", now=12)
+    assert guard.allow("device", "jarvis.frontDoor.status", now=12)
+    assert guard.allow("device", "jarvis.status", now=17)
 
 
 @pytest.mark.asyncio
