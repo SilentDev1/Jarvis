@@ -23,6 +23,7 @@ from .config import get_settings
 from .core.events import EventBus
 from .core.notifications import format_visitor_notification
 from .core.security import sanitize
+from .core.voice_input import is_meaningful_utterance
 from .devices.auth import issue_device_token, revoke_device_tokens
 from .integrations.providers import (
     LogNotification,
@@ -1139,6 +1140,9 @@ async def sim_say(sid: str, item: VisitorInput):
     if not state:
         raise HTTPException(404, "No active visitor session")
     text = sanitize(item.text)
+    if not is_meaningful_utterance(text):
+        bus.publish("voice.input_ignored", {"reason": "empty_or_noise_only"})
+        return Response(status_code=204)
     state.turns.append({"role": "user", "content": text})
     bus.publish("visitor.spoke", {"session_id": sid, "text": text})
     t0 = time.perf_counter()

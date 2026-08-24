@@ -133,3 +133,5 @@ Display lifecycle control is not available through the verified stock XDC MCP
 surface, so factory listening/thinking/speaking UI remains in use. Push-to-talk
 or the stock activation behavior is retained. Do not flash firmware; any future
 firmware path requires a verified full-flash/NVS backup plan and owner approval.
+The exact stock activation boundary and safe standby workflow are documented in
+`docs/AIPI_ACTIVATION.md`.
