@@ -11,7 +11,7 @@ def token_hash(token: str) -> str:
 
 
 def issue_device_token(store, device_id: str) -> str:
-    token = "jdv_" + secrets.token_urlsafe(32)
+    token = "jdv_" + secrets.token_urlsafe(12)
     with store.Session() as session:
         device = session.get(Device, device_id)
         if device is None:
@@ -27,6 +27,39 @@ def issue_device_token(store, device_id: str) -> str:
         )
         session.commit()
     return token
+
+
+def set_device_password(store, device_id: str, password: str) -> None:
+    if len(password) < 12 or len(password) > 64:
+        raise ValueError("Device password must be 12-64 characters")
+    with store.Session() as session:
+        device = session.get(Device, device_id)
+        if device is None:
+            raise ValueError("Unknown device")
+        session.add(
+            DeviceCredential(
+                device_id=device_id,
+                token_hash=token_hash(password),
+                token_prefix="password",
+                enabled=True,
+                created_at=utcnow(),
+            )
+        )
+        session.commit()
+
+
+def revoke_device_token(store, token: str) -> bool:
+    digest = token_hash(token)
+    with store.Session() as session:
+        credential = session.scalar(
+            select(DeviceCredential).where(DeviceCredential.token_hash == digest)
+        )
+        if credential is None or not secrets.compare_digest(credential.token_hash, digest):
+            return False
+        credential.enabled = False
+        credential.revoked_at = utcnow()
+        session.commit()
+        return True
 
 
 def authenticate_device(store, token: str | None) -> Device | None:

@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 from jarvis_home.devices.auth import (
     authenticate_device,
     issue_device_token,
+    revoke_device_token,
     revoke_device_tokens,
 )
 from jarvis_home.devices.mcp_gateway import (
@@ -47,6 +48,15 @@ def test_device_token_authentication_and_revocation(device_store):
     assert authenticate_device(device_store, "wrong") is None
     assert revoke_device_tokens(device_store, device.id) == 1
     assert authenticate_device(device_store, token) is None
+
+
+def test_single_device_token_can_be_revoked_without_revoking_siblings(device_store):
+    first = issue_device_token(device_store, "aipi-front-door")
+    second = issue_device_token(device_store, "aipi-front-door")
+    assert len(first) == 20
+    assert revoke_device_token(device_store, first)
+    assert authenticate_device(device_store, first) is None
+    assert authenticate_device(device_store, second) is not None
 
 
 def test_disabled_device_is_blocked(device_store):
@@ -292,7 +302,10 @@ def test_registered_aipi_is_workspace_scoped(device_store):
     with device_store.Session() as session:
         device = session.get(Device, "aipi-front-door")
         assert device.workspace_id == "home"
-        assert "VOICE_INPUT" in json.loads(device.capabilities)
+        capabilities = json.loads(device.capabilities)
+        assert "LOCAL_CONNECTION" in capabilities
+        assert "STATUS" in capabilities
+        assert "VOICE_INPUT" not in capabilities
         tools = {
             row.tool_name
             for row in session.scalars(

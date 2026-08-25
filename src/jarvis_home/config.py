@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     admin_session_days: int = Field(30, ge=1, le=365)
     device_gateway_host: str = "127.0.0.1"
     device_gateway_port: int = 8766
+    local_device_gateway_host: str = "0.0.0.0"
+    local_device_gateway_port: int = 8767
     jarvis_core_url: str = "http://127.0.0.1:8765"
     mcp_allowed_hosts: str = "127.0.0.1,localhost"
     data_dir: Path = Path("./data")

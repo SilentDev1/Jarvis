@@ -1,6 +1,6 @@
 # Jarvis AiPi custom firmware
 
-`firmware/aipi-jarvis` is version `0.1.1-wifi`. The controlled stage-1 image
+`firmware/aipi-jarvis` is version `0.2.0-local`. The controlled stage-1 image
 was physically flashed on 2026-08-24 after the factory gate was reverified. It
 boots on the exact ESP32-S3 revision 0.2 unit without panic, watchdog, brownout,
 or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
@@ -68,3 +68,27 @@ camera-triggered conversation remain intentionally disabled until each
 preceding physical bring-up stage passes. Wi-Fi provisioning, reboot
 persistence, reconnect, and deliberate reconfiguration are physically verified.
 No Wi-Fi, device, or admin credential is compiled into this image.
+
+## Authenticated local connection
+
+The physical unit now connects directly over the home LAN to the dedicated
+Jarvis device gateway on port 8767. The gateway exposes only health and the
+versioned device WebSocket; it does not expose the dashboard, admin API, MCP,
+shell, filesystem, cameras, or audio. The board resolves the configured local
+hostname (`jarvis.local` in the verified setup), authenticates with its own
+revocable device password, sends `DEVICE_HELLO`, answers `PING` and
+`STATUS_REQUEST`, and reports bounded non-secret health telemetry.
+
+The device password is entered through the local setup portal and stored in the
+custom NVS namespace. Jarvis stores only a password hash. Neither side logs the
+credential. `scripts/set-aipi-device-password.py` rotates it without displaying
+it. `scripts/start-local-device-gateway.sh` advertises the service over mDNS
+when the host LAN address can be determined, while the NVS hostname remains the
+safe configured fallback.
+
+Physical validation on 2026-08-25 passed boot reconnect, authenticated ONLINE
+registration, heartbeat/status telemetry, a controlled Wi-Fi interruption, and
+a Jarvis gateway stop/start. The gateway restart exposed a library reconnect
+gap; firmware now uses an explicit five-second supervised reconnect loop. The
+same powered board then returned ONLINE without rebooting. Speaker, microphone,
+STT, TTS, and camera-triggered speech remain disabled in this image.

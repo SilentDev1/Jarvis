@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_flash.h"
 #include "nvs_flash.h"
+#include "local_connection.h"
 #include "terminal_state.h"
 #include "wifi_provision.h"
 
@@ -15,7 +16,7 @@ void app_main(void) {
     uint32_t flash_size = 0;
     esp_chip_info(&chip);
     esp_flash_get_size(NULL, &flash_size);
-    ESP_LOGI(TAG, "Jarvis AiPi 0.1.1-wifi");
+    ESP_LOGI(TAG, "Jarvis AiPi 0.2.0-local");
     ESP_LOGI(TAG, "chip=ESP32-S3 revision=%d cores=%d flash=%luMB", chip.revision,
              chip.cores, (unsigned long)(flash_size / (1024 * 1024)));
     ESP_LOGI(TAG, "PSRAM total=%u free=%u", heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
@@ -51,6 +52,12 @@ void app_main(void) {
         if (wifi_result != ESP_OK) {
             ESP_LOGE(TAG, "Wi-Fi provisioning failed: %s", esp_err_to_name(wifi_result));
             bringup_display_status("JARVIS", "WI-FI ERROR", "CHECK SERIAL");
+        } else if (wifi_provision_status().connected) {
+            esp_err_t local_result = local_connection_start();
+            if (local_result != ESP_OK && local_result != ESP_ERR_NOT_FOUND) {
+                ESP_LOGE(TAG, "Local Jarvis connection failed to start: %s",
+                         esp_err_to_name(local_result));
+            }
         }
     }
 }

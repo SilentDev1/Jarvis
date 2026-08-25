@@ -25,6 +25,9 @@
 #define WIFI_KEY_SSID "ssid"
 #define WIFI_KEY_PASSWORD "password"
 #define WIFI_KEY_RECONNECT_TEST "reconnect_ok"
+#define WIFI_KEY_JARVIS_HOST "jarvis_host"
+#define WIFI_KEY_JARVIS_PORT "jarvis_port"
+#define WIFI_KEY_DEVICE_PASSWORD "device_password"
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT BIT1
 #define WIFI_CONNECT_RETRIES 5
@@ -46,7 +49,13 @@ static const char PORTAL_HTML[] =
     "margin:.4em 0}</style><h1>Jarvis AiPi Wi-Fi</h1><form method=post action=/provision>"
     "<label>Network name<input name=ssid maxlength=32 required autocomplete=off></label>"
     "<label>Wi-Fi password<input name=password type=password minlength=8 maxlength=63 required>"
-    "</label><button>Connect</button></form>";
+    "</label><h2>Local Jarvis</h2>"
+    "<label>Jarvis host<input name=host maxlength=80 required value=jarvis.local "
+    "autocomplete=off></label><label>Gateway port<input name=port type=number min=1 "
+    "max=65535 required value=8767></label>"
+    "<label>Device password<input name=device_password type=password minlength=12 maxlength=64 "
+    "required autocomplete=new-password autocapitalize=none spellcheck=false></label>"
+    "<button>Connect</button></form>";
 
 static bool load_credentials(char ssid[33], char password[64]) {
     nvs_handle_t handle;
@@ -64,6 +73,35 @@ static esp_err_t save_credentials(const char *ssid, const char *password) {
     if (result != ESP_OK) return result;
     if ((result = nvs_set_str(handle, WIFI_KEY_SSID, ssid)) == ESP_OK &&
         (result = nvs_set_str(handle, WIFI_KEY_PASSWORD, password)) == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return result;
+}
+
+bool wifi_provision_load_jarvis_config(jarvis_local_config_t *config) {
+    if (!config) return false;
+    memset(config, 0, sizeof(*config));
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+    size_t host_len = sizeof(config->host), password_len = sizeof(config->device_password);
+    esp_err_t a = nvs_get_str(handle, WIFI_KEY_JARVIS_HOST, config->host, &host_len);
+    esp_err_t b = nvs_get_u16(handle, WIFI_KEY_JARVIS_PORT, &config->port);
+    esp_err_t c = nvs_get_str(handle, WIFI_KEY_DEVICE_PASSWORD, config->device_password,
+                              &password_len);
+    nvs_close(handle);
+    return a == ESP_OK && b == ESP_OK && c == ESP_OK && host_len > 1 &&
+           config->port > 0 && password_len >= 13;
+}
+
+static esp_err_t save_jarvis_config(const char *host, uint16_t port,
+                                    const char *device_password) {
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(WIFI_NAMESPACE, NVS_READWRITE, &handle);
+    if (result != ESP_OK) return result;
+    if ((result = nvs_set_str(handle, WIFI_KEY_JARVIS_HOST, host)) == ESP_OK &&
+        (result = nvs_set_u16(handle, WIFI_KEY_JARVIS_PORT, port)) == ESP_OK &&
+        (result = nvs_set_str(handle, WIFI_KEY_DEVICE_PASSWORD, device_password)) == ESP_OK) {
         result = nvs_commit(handle);
     }
     nvs_close(handle);
@@ -213,32 +251,49 @@ static void restart_task(void *unused) {
 }
 
 static esp_err_t portal_post(httpd_req_t *request) {
-    if (request->content_len <= 0 || request->content_len > 256) {
+    if (request->content_len <= 0 || request->content_len > 512) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid request");
     }
-    char body[257] = {0};
+    char body[513] = {0};
     int received = 0;
     while (received < request->content_len) {
         int count = httpd_req_recv(request, body + received, request->content_len - received);
         if (count <= 0) return ESP_FAIL;
         received += count;
     }
-    char ssid[33] = {0}, password[64] = {0};
+    char ssid[33] = {0}, password[64] = {0}, host[81] = {0},
+         device_password[65] = {0};
+    char port_text[6] = {0};
     bool valid = url_decode_field(body, "ssid", ssid, sizeof(ssid)) &&
-                 url_decode_field(body, "password", password, sizeof(password));
-    size_t ssid_len = strlen(ssid), password_len = strlen(password);
-    if (!valid || ssid_len < 1 || ssid_len > 32 || password_len < 8 || password_len > 63) {
+                 url_decode_field(body, "password", password, sizeof(password)) &&
+                 url_decode_field(body, "host", host, sizeof(host)) &&
+                 url_decode_field(body, "port", port_text, sizeof(port_text)) &&
+                 url_decode_field(body, "device_password", device_password,
+                                  sizeof(device_password));
+    size_t ssid_len = strlen(ssid), password_len = strlen(password), host_len = strlen(host),
+           device_password_len = strlen(device_password);
+    char *port_end = NULL;
+    long port = strtol(port_text, &port_end, 10);
+    if (!valid || ssid_len < 1 || ssid_len > 32 || password_len < 8 || password_len > 63 ||
+        host_len < 1 || host_len > 80 || device_password_len < 12 ||
+        device_password_len > 64 ||
+        !port_end || *port_end != '\0' || port < 1 || port > 65535) {
         memset(password, 0, sizeof(password));
-        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi fields");
+        memset(device_password, 0, sizeof(device_password));
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid setup fields");
     }
     esp_err_t result = save_credentials(ssid, password);
+    if (result == ESP_OK) {
+        result = save_jarvis_config(host, (uint16_t)port, device_password);
+    }
     memset(password, 0, sizeof(password));
+    memset(device_password, 0, sizeof(device_password));
     memset(body, 0, sizeof(body));
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "credential storage failed: %s", esp_err_to_name(result));
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Storage failed");
     }
-    ESP_LOGI(TAG, "Wi-Fi credentials saved (password omitted)");
+    ESP_LOGI(TAG, "Wi-Fi and local Jarvis configuration saved (secrets omitted)");
     status.configured = true;
     bringup_display_status("JARVIS", "WI-FI SAVED", "RESTARTING");
     httpd_resp_set_type(request, "text/html");

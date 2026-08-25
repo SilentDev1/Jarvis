@@ -17,6 +17,10 @@ if ! [ -f run/device-gateway.pid ] || ! kill -0 "$(cat run/device-gateway.pid)" 
   nohup python -m uvicorn jarvis_home.devices.mcp_gateway:app --app-dir src --host "${DEVICE_GATEWAY_HOST:-127.0.0.1}" --port "${DEVICE_GATEWAY_PORT:-8766}" > logs/device-gateway.log 2>&1 &
   echo $! > run/device-gateway.pid
 fi
+if ! [ -f run/local-device-gateway.pid ] || ! kill -0 "$(cat run/local-device-gateway.pid)" 2>/dev/null; then
+  nohup ./scripts/start-local-device-gateway.sh > logs/local-device-gateway.log 2>&1 &
+  echo $! > run/local-device-gateway.pid
+fi
 if [ -n "${CLOUDFLARE_TUNNEL_CONFIG:-}" ] && command -v cloudflared >/dev/null 2>&1; then
   if ! [ -f run/cloudflared.pid ] || ! kill -0 "$(cat run/cloudflared.pid)" 2>/dev/null; then
     nohup cloudflared tunnel --config "$CLOUDFLARE_TUNNEL_CONFIG" run > logs/cloudflared.log 2>&1 &
@@ -25,4 +29,5 @@ if [ -n "${CLOUDFLARE_TUNNEL_CONFIG:-}" ] && command -v cloudflared >/dev/null 2
 fi
 echo "Jarvis Home started: http://${JARVIS_HOST:-127.0.0.1}:${JARVIS_PORT:-8765}"
 echo "Device gateway started: http://${DEVICE_GATEWAY_HOST:-127.0.0.1}:${DEVICE_GATEWAY_PORT:-8766}/mcp"
+echo "Local AiPi gateway started on LAN port ${LOCAL_DEVICE_GATEWAY_PORT:-8767}"
 [ -z "${CLOUDFLARE_TUNNEL_CONFIG:-}" ] || echo "Named Cloudflare tunnel startup configured"
