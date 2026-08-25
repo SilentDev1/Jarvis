@@ -5,9 +5,10 @@ was physically flashed on 2026-08-24 after the factory gate was reverified. It
 boots on the exact ESP32-S3 revision 0.2 unit without panic, watchdog, brownout,
 or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
 80 MHz, a passing PSRAM memory test, ESP-IDF 5.3.2, and ES8311 detection at the
-expected control-bus address. Visual display orientation/readability and
-physical GPIO42 button transitions still require owner observation and are not
-yet marked physically verified.
+expected control-bus address. The owner physically confirmed the `JARVIS /`
+`BRING-UP 0.1.0 / CODEC: PASS` screen was visible. A monitored physical press
+then produced exactly one `BUTTON_DOWN` and one `BUTTON_UP` transition, 200 ms
+apart, confirming the GPIO42 input and debounce path.
 
 ESP-IDF is selected for native ESP32-S3 bootloader, OTA rollback, NVS, Wi-Fi,
 WebSocket/TLS, I2S, and diagnostics support. The intended modules are app/state,
@@ -23,11 +24,11 @@ unsafe and is never configured.
 
 | Signal | GPIO | Evidence state |
 | --- | ---: | --- |
-| LCD backlight | 3 | community + stock-log corroborated; visual check pending |
+| LCD backlight | 3 | physically verified on this unit |
 | ES8311 I2C SCL/SDA | 4/5 | physically verified on this unit by codec probe |
-| LCD D/C, CS, SCLK, MOSI, reset | 7/15/16/17/18 | community + stock-log corroborated; visual check pending |
+| LCD D/C, CS, SCLK, MOSI, reset | 7/15/16/17/18 | physically verified on this unit |
 | speaker amplifier enable | 9 | community corroborated; forced low only |
-| function button | 42 | community corroborated; press/release check pending |
+| function button | 42 | physically verified on this unit |
 | board power control | 10 | unverified; never configure |
 
 The custom partition table keeps the original factory NVS bytes at `0x9000`
