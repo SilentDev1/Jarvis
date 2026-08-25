@@ -12,6 +12,7 @@
 #define AIPI_LCD_MOSI GPIO_NUM_17
 #define AIPI_LCD_RESET GPIO_NUM_18
 #define AIPI_BUTTON GPIO_NUM_42
+#define AIPI_WIFI_RESET_HOLD_MS 8000
 
 /* GPIO10 is a community-reported board power control. Never configure it. */
 #define AIPI_UNVERIFIED_POWER_GPIO GPIO_NUM_10

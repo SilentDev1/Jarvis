@@ -1,6 +1,6 @@
 # Jarvis AiPi custom firmware
 
-`firmware/aipi-jarvis` is version `0.1.0-bringup`. The controlled stage-1 image
+`firmware/aipi-jarvis` is version `0.1.1-wifi`. The controlled stage-1 image
 was physically flashed on 2026-08-24 after the factory gate was reverified. It
 boots on the exact ESP32-S3 revision 0.2 unit without panic, watchdog, brownout,
 or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
@@ -9,6 +9,18 @@ expected control-bus address. The owner physically confirmed the `JARVIS /`
 `BRING-UP 0.1.0 / CODEC: PASS` screen was visible. A monitored physical press
 then produced exactly one `BUTTON_DOWN` and one `BUTTON_UP` transition, 200 ms
 apart, confirming the GPIO42 input and debounce path.
+
+The subsequent Wi-Fi image was physically validated on the same unit. Its
+display-only setup password and local SoftAP portal successfully provisioned a
+WPA3-SAE home connection, saved the credentials in the custom NVS namespace,
+restarted automatically, and acquired a DHCP lease on the first connection
+attempt. A one-time controlled disconnect/reconnect self-test completed and
+persisted its success marker. The owner then held the physical side button
+during boot for eight seconds: the device cleared only the custom Jarvis Wi-Fi
+namespace, returned to setup mode, accepted fresh provisioning, restarted, and
+reconnected. A phone-generated request initially exceeded the default HTTP
+header limit; the bounded limit was raised to 2048 bytes and the physical retry
+passed. Serial output omitted both the Wi-Fi password and network name.
 
 ESP-IDF is selected for native ESP32-S3 bootloader, OTA rollback, NVS, Wi-Fi,
 WebSocket/TLS, I2S, and diagnostics support. The intended modules are app/state,
@@ -48,9 +60,11 @@ Scripts:
 
 The maintained ESP-IDF 5.3.2 toolchain is installed outside Git under the
 workspace toolchains directory. CMake and Ninja are installed locally. Build
-artifacts remain ignored. The stage-1 build and physical flash both passed.
+artifacts remain ignored. The stage-1 and Wi-Fi builds and physical flashes
+passed.
 
-Audio drivers, Wi-Fi provisioning, authenticated local WebSocket operation,
-local TTS/STT, and camera-triggered conversation remain intentionally disabled
-until each preceding physical bring-up stage passes. No Wi-Fi, device, or admin
-credential is compiled into this image.
+Audio drivers, authenticated local WebSocket operation, local TTS/STT, and
+camera-triggered conversation remain intentionally disabled until each
+preceding physical bring-up stage passes. Wi-Fi provisioning, reboot
+persistence, reconnect, and deliberate reconfiguration are physically verified.
+No Wi-Fi, device, or admin credential is compiled into this image.

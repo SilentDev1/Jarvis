@@ -5,6 +5,7 @@
 #include "esp_flash.h"
 #include "nvs_flash.h"
 #include "terminal_state.h"
+#include "wifi_provision.h"
 
 static const char *TAG = "jarvis_aipi";
 
@@ -14,7 +15,7 @@ void app_main(void) {
     uint32_t flash_size = 0;
     esp_chip_info(&chip);
     esp_flash_get_size(NULL, &flash_size);
-    ESP_LOGI(TAG, "Jarvis AiPi 0.1.0-bringup");
+    ESP_LOGI(TAG, "Jarvis AiPi 0.1.1-wifi");
     ESP_LOGI(TAG, "chip=ESP32-S3 revision=%d cores=%d flash=%luMB", chip.revision,
              chip.cores, (unsigned long)(flash_size / (1024 * 1024)));
     ESP_LOGI(TAG, "PSRAM total=%u free=%u", heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
@@ -22,8 +23,10 @@ void app_main(void) {
     ESP_LOGW(TAG, "GPIO10 board-power control is untouched");
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGE(TAG, "NVS requires recovery; refusing automatic erase");
-        state = TERMINAL_ERROR;
+        ESP_LOGW(TAG, "initializing custom NVS partition; factory NVS at 0x9000 is untouched");
+        result = nvs_flash_erase_partition("nvs");
+        if (result == ESP_OK) result = nvs_flash_init();
+        state = result == ESP_OK ? TERMINAL_CONNECTING : TERMINAL_ERROR;
     } else if (result != ESP_OK) {
         ESP_LOGE(TAG, "NVS initialization failed: %s", esp_err_to_name(result));
         state = TERMINAL_ERROR;
@@ -40,4 +43,14 @@ void app_main(void) {
     ESP_LOGI(TAG, "state=%s display=%s button=%s codec=%s", terminal_state_name(state),
              display_ready ? "PASS" : "FAIL", button_ready ? "PASS" : "FAIL",
              codec_ready ? "PASS" : "FAIL");
+    if (result == ESP_OK && wifi_provision_boot_reset_requested()) {
+        ESP_ERROR_CHECK(wifi_provision_clear_custom_config());
+    }
+    if (result == ESP_OK) {
+        esp_err_t wifi_result = wifi_provision_start();
+        if (wifi_result != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi provisioning failed: %s", esp_err_to_name(wifi_result));
+            bringup_display_status("JARVIS", "WI-FI ERROR", "CHECK SERIAL");
+        }
+    }
 }

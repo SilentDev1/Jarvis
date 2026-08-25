@@ -135,6 +135,16 @@ void bringup_display_status(const char *line1, const char *line2, const char *li
     lcd_text(line3, 7, 78, 1, 0x07e0);
 }
 
+void bringup_display_status4(const char *line1, const char *line2, const char *line3,
+                             const char *line4) {
+    if (!lcd) return;
+    lcd_fill(0x0000);
+    lcd_text(line1, 7, 8, 2, 0xffff);
+    lcd_text(line2, 7, 48, 1, 0x07ff);
+    lcd_text(line3, 7, 66, 1, 0xffff);
+    lcd_text(line4, 7, 84, 1, 0x07e0);
+}
+
 static void button_task(void *unused) {
     (void)unused;
     int stable = gpio_get_level(AIPI_BUTTON), prior = stable, count = 0;
