@@ -18,6 +18,8 @@ from .audio_stream import (
     duration_seconds,
     validate_format,
 )
+from .firmware_release import is_newer
+from .ota import UPDATABLE_STATES, OtaState, OtaStatus
 from .terminal_state import TerminalState, TerminalStateMachine
 
 PROTOCOL_VERSION = 1
@@ -132,6 +134,8 @@ class LocalDeviceHub:
         # Set by the gateway so a physical button press can start a voice turn
         # without the protocol layer depending on the voice loop.
         self.on_button_pressed = None
+        # OTA is owner-initiated only; nothing here starts an update by itself.
+        self.ota = OtaStatus()
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -325,6 +329,67 @@ class LocalDeviceHub:
             json.dumps(message(message_type, **payload), separators=(",", ":"))
         )
 
+    async def offer_update(self, record: dict, force: bool = False) -> dict:
+        """Offer a published release to the device.
+
+        Refused unless the terminal is genuinely idle: an update that
+        interrupts a visitor conversation, or that starts while the amplifier
+        is live, is worse than one that waits.
+        """
+        manifest = record["manifest"]
+        if self.websocket is None:
+            raise AudioStreamError("device_not_connected")
+        if not self.health.ready:
+            raise AudioStreamError("device_not_ready")
+        if self.terminal.state not in UPDATABLE_STATES:
+            raise AudioStreamError(f"terminal_busy:{self.terminal.state}")
+        if self._audio_active or self._mic_stream_id is not None:
+            raise AudioStreamError("audio_in_progress")
+        if self.ota.is_active() and not self.ota.is_stalled():
+            raise AudioStreamError(f"update_already_active:{self.ota.state}")
+
+        current = self.health.firmware_version
+        if not force and current and not is_newer(manifest["version"], current):
+            # Re-installing the same or an older build is almost always a
+            # mistake; it stays possible but must be asked for explicitly.
+            raise AudioStreamError("not_newer_than_installed")
+
+        self.ota.begin(manifest["version"], current)
+        await self.send(
+            "OTA_OFFER",
+            manifest=manifest,
+            signature=record["signature"],
+            url=f"/firmware/{manifest['version']}/image",
+        )
+        return {"offered": manifest["version"], "previous": current,
+                "state": self.ota.public()}
+
+    def _handle_ota_message(self, value: dict) -> bool:
+        kind = value.get("type")
+        if kind == "OTA_PROGRESS":
+            self.ota.advance(
+                OtaState.DOWNLOADING,
+                progress=int(value.get("percent", 0)),
+                detail=str(value.get("detail", ""))[:120] or None,
+            )
+            return True
+        if kind == "OTA_STATUS":
+            raw = str(value.get("state", ""))
+            try:
+                state = OtaState(raw)
+            except ValueError:
+                # An unknown state from the device is a protocol violation, not
+                # something to guess at.
+                self.ota.advance(OtaState.FAILED, detail=f"unknown_state:{raw[:40]}")
+                return True
+            self.ota.advance(
+                state,
+                progress=int(value.get("percent", self.ota.progress)),
+                detail=str(value.get("detail", ""))[:120] or None,
+            )
+            return True
+        return False
+
     def _handle_microphone_message(self, value: dict) -> bool:
         kind = value.get("type")
         if kind == "BUTTON_PRESSED":
@@ -357,6 +422,8 @@ class LocalDeviceHub:
         now = time.time()
         self.health.last_seen = now
         message_type = value["type"]
+        if self._handle_ota_message(value):
+            return
         if self._handle_microphone_message(value):
             return
         if message_type == "DEVICE_HELLO":

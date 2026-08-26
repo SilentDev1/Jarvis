@@ -13,6 +13,9 @@ data/zones.json
 data/media/*
 !data/media/.gitkeep
 data/models/
+# Firmware store: built binaries are build artifacts, not source. The signed
+# manifests are reproducible from a build plus the signing key.
+data/firmware/
 data/faces/
 *.pt
 logs/*

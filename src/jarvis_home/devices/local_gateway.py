@@ -9,6 +9,7 @@ from array import array
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.responses import FileResponse
 from fastapi.websockets import WebSocketDisconnect
 
 from ..config import get_settings
@@ -29,6 +30,12 @@ from .audio_stream import (
     validate_format,
 )
 from .auth import authenticate_device
+from .firmware_release import (
+    DEVICE_ID,
+    FirmwareError,
+    FirmwareStore,
+    is_newer,
+)
 from .local_protocol import (
     HEARTBEAT_INTERVAL_SECONDS,
     MAX_CONTROL_BYTES,
@@ -57,6 +64,7 @@ logger = logging.getLogger("jarvis_home.device_gateway")
 
 # One shared recogniser and filter: the model costs seconds to load and the
 # filter's echo memory must persist across turns to catch Jarvis hearing itself.
+firmware_store = FirmwareStore(cfg.data_dir / "firmware")
 stt = FasterWhisperSTT()
 utterance_filter = UtteranceFilter()
 # Local reasoning by default. A door terminal must keep working when no model
@@ -257,6 +265,69 @@ async def voice_turn(request: Request):
     except AudioStreamError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return turn.public()
+
+
+@app.get("/firmware/{version}/image")
+async def firmware_image(version: str, request: Request):
+    """Serve one approved firmware image to the authenticated device.
+
+    Only artifacts that were explicitly published are reachable, and only by a
+    device presenting its own credential. The build directory and the wider
+    filesystem are never exposed.
+    """
+    supplied = request.headers.get("authorization", "")
+    password = (
+        supplied[15:] if supplied.lower().startswith("devicepassword ") else None
+    )
+    device = authenticate_device(store, password)
+    if device is None or device.id != DEVICE_ID:
+        logger.warning("Firmware download rejected: unauthorized device")
+        raise HTTPException(status_code=401, detail="unauthorized_device")
+    try:
+        path = firmware_store.image_path(version)
+    except FirmwareError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return FileResponse(path, media_type="application/octet-stream")
+
+
+@app.get("/internal/firmware/releases")
+async def firmware_releases(request: Request):
+    """List published releases and what the device is currently running."""
+    _authorize_loopback_admin(request)
+    latest = firmware_store.latest("development")
+    current = hub.health.firmware_version
+    update_available = bool(
+        latest and current and is_newer(latest["manifest"]["version"], current)
+    )
+    return {
+        "current": current,
+        "latest": (latest or {}).get("manifest"),
+        "updateAvailable": update_available,
+        "releases": [r["manifest"] for r in firmware_store.available()],
+        "state": hub.ota.public(),
+    }
+
+
+@app.post("/internal/firmware/update")
+async def firmware_update(request: Request):
+    """Offer an update to the device. Owner-approved, never automatic."""
+    _authorize_loopback_admin(request)
+    payload = await request.json() if await request.body() else {}
+    version = str(payload.get("version", "")).strip()
+    force = bool(payload.get("force", False))
+    if not version:
+        latest = firmware_store.latest("development")
+        if latest is None:
+            raise HTTPException(status_code=404, detail="no_releases_published")
+        version = latest["manifest"]["version"]
+    try:
+        record = firmware_store.record(version)
+    except FirmwareError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    try:
+        return await hub.offer_update(record, force=force)
+    except AudioStreamError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.websocket("/ws/device")

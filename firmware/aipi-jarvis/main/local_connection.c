@@ -5,6 +5,7 @@
 
 #include "bringup.h"
 #include "audio_output.h"
+#include "ota_update.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -18,7 +19,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.6.0-voice-turn"
+#define FIRMWARE_VERSION "0.7.3-ota-test"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -106,6 +107,8 @@ static void send_status(void) {
     cJSON_AddStringToObject(root, "displayStatus", online ? "ONLINE" : "OFFLINE");
     cJSON_AddStringToObject(root, "buttonStatus", "READY");
     cJSON_AddStringToObject(root, "terminalState", online ? "JARVIS_ONLINE" : "AUTHENTICATING");
+    cJSON_AddStringToObject(root, "otaSlot", ota_update_running_slot());
+    cJSON_AddBoolToObject(root, "otaPendingVerify", ota_update_pending_verify());
     send_json(root);
 }
 
@@ -202,6 +205,60 @@ static void on_playback_finished(uint32_t bytes, const char *reason) {
     cJSON_AddNumberToObject(done, "bytes", bytes);
     cJSON_AddStringToObject(done, "reason", reason ? reason : "complete");
     send_json(done);
+}
+
+/* Reports OTA progress to Jarvis and to the physical display.
+ *
+ * The display deliberately shows only state and percentage: no URLs, no
+ * credentials, nothing that would leak if someone photographed the door. */
+/* Confirms a freshly installed image, but only after it has proved itself.
+ *
+ * Reaching an authenticated Jarvis connection already demonstrates that boot,
+ * PSRAM, display, Wi-Fi and the gateway handshake all work. The task then
+ * waits out a health window before marking the image valid, so a build that
+ * boots and then panics or watchdogs is never confirmed and the bootloader
+ * rolls back on the next reset. */
+#define OTA_HEALTH_WINDOW_MS 30000
+
+static void ota_confirm_task(void *unused) {
+    (void)unused;
+    vTaskDelay(pdMS_TO_TICKS(OTA_HEALTH_WINDOW_MS));
+    if (!online) {
+        /* Connection lost during the window: do not confirm. A reset now rolls
+         * back to the previous image. */
+        ESP_LOGW(TAG, "OTA health window ended OFFLINE; leaving image unconfirmed");
+        vTaskDelete(NULL);
+        return;
+    }
+    esp_err_t result = ota_update_mark_valid();
+    ESP_LOGI(TAG, "OTA image confirmed after health window: %s",
+             esp_err_to_name(result));
+    cJSON *message = base_message("OTA_STATUS");
+    cJSON_AddStringToObject(message, "state", "SUCCEEDED");
+    cJSON_AddNumberToObject(message, "percent", 100);
+    cJSON_AddStringToObject(message, "detail", "health_window_passed");
+    send_json(message);
+    vTaskDelete(NULL);
+}
+
+static void ota_report(const char *state, int percent, const char *detail) {
+    cJSON *message = base_message("OTA_STATUS");
+    cJSON_AddStringToObject(message, "state", state);
+    cJSON_AddNumberToObject(message, "percent", percent);
+    if (detail) cJSON_AddStringToObject(message, "detail", detail);
+    send_json(message);
+
+    char line[24];
+    if (!strcmp(state, "DOWNLOADING")) {
+        snprintf(line, sizeof(line), "UPDATING %d%%", percent);
+    } else if (!strcmp(state, "VERIFYING")) {
+        snprintf(line, sizeof(line), "VERIFYING");
+    } else if (!strcmp(state, "REBOOTING")) {
+        snprintf(line, sizeof(line), "RESTARTING");
+    } else {
+        snprintf(line, sizeof(line), "UPDATE FAILED");
+    }
+    bringup_display_status("JARVIS", line, FIRMWARE_VERSION);
 }
 
 static void capture_task(void *unused) {
@@ -303,6 +360,12 @@ static void process_control(const char *data, int length) {
         bringup_display_status4("JARVIS", "WI-FI: OK", "JARVIS: ONLINE", FIRMWARE_VERSION);
         ESP_LOGI(TAG, "authenticated local connection ONLINE");
         send_status();
+        if (ota_update_pending_verify()) {
+            ESP_LOGW(TAG, "running a freshly installed image; starting health window");
+            bringup_display_status4("JARVIS", "WI-FI: OK", "VERIFYING UPDATE",
+                                    FIRMWARE_VERSION);
+            xTaskCreate(ota_confirm_task, "aipi_ota_ok", 3072, NULL, 4, NULL);
+        }
     } else if (!strcmp(type->valuestring, "PING")) {
         cJSON *reply = base_message("PONG");
         cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
@@ -373,6 +436,21 @@ static void process_control(const char *data, int length) {
         }
     } else if (!strcmp(type->valuestring, "LISTEN_STOP")) {
         capture_stop_requested = true;
+    } else if (!strcmp(type->valuestring, "OTA_OFFER")) {
+        /* Firmware replacement is the most privileged operation here, so it is
+         * refused unless the session is authenticated and the device is idle. */
+        if (!online) {
+            ESP_LOGW(TAG, "OTA_OFFER rejected: session not ready");
+        } else if (audio_playback_active() || audio_input_active() ||
+                   capture_task_handle) {
+            ESP_LOGW(TAG, "OTA_OFFER rejected: audio in progress");
+            ota_report("FAILED", 0, "audio_in_progress");
+        } else {
+            esp_err_t result = ota_update_handle_offer(root, ota_report);
+            if (result != ESP_OK) {
+                ESP_LOGW(TAG, "OTA_OFFER rejected: %s", esp_err_to_name(result));
+            }
+        }
     }
     cJSON_Delete(root);
 }
