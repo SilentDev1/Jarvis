@@ -2,9 +2,8 @@
 
 `firmware/aipi-jarvis` is version `0.2.3-speaker-clock`. The controlled stage-1
 image was physically flashed on 2026-08-24 after the factory gate was
-reverified. It
-boots on the exact ESP32-S3 revision 0.2 unit without panic, watchdog, brownout,
-or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
+reverified. It boots on the exact ESP32-S3 revision 0.2 unit without panic,
+watchdog, brownout, or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
 80 MHz, a passing PSRAM memory test, ESP-IDF 5.3.2, and ES8311 detection at the
 expected control-bus address. The owner physically confirmed the `JARVIS /`
 `BRING-UP 0.1.0 / CODEC: PASS` screen was visible. A monitored physical press
@@ -40,8 +39,8 @@ unsafe and is never configured.
 | LCD backlight | 3 | physically verified on this unit |
 | ES8311 I2C SCL/SDA | 4/5 | physically verified on this unit by codec probe |
 | LCD D/C, CS, SCLK, MOSI, reset | 7/15/16/17/18 | physically verified on this unit |
-| speaker amplifier enable | 9 | physically verified on this unit by audible tone |
 | I2S MCLK | 6 | physically verified on this unit by audible tone |
+| speaker amplifier enable | 9 | physically verified on this unit by audible tone |
 | I2S DOUT | 11 | physically verified on this unit by audible tone |
 | I2S WS/LRCLK | 12 | physically verified on this unit by audible tone |
 | I2S DIN | 13 | known mapping; deliberately unused |
