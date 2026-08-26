@@ -148,3 +148,16 @@ def test_settings_change_reports_status_immediately():
     connection = read("local_connection.c")
     window = connection.split('"ARC_SETTINGS"', 1)[1].split("else if", 1)[0]
     assert "send_status()" in window
+
+
+def test_control_script_never_requires_handling_a_token_by_hand():
+    # Making the owner paste an admin token to dim a light is how people end
+    # up echoing credentials into shell history.
+    script = (ROOT / "scripts" / "arc-light.sh").read_text()
+    assert ". ./.env" in script
+    assert "JARVIS_ADMIN_TOKEN" in script
+    # The token is read from .env, never printed or accepted as an argument.
+    assert "echo \"$TOKEN\"" not in script
+    assert "$1" not in script.split("post()")[1].split("}")[0].replace('-d "$1"', "")
+    for verb in ("off", "dim", "on", "bright", "status"):
+        assert f"  {verb})" in script or f"{verb})" in script

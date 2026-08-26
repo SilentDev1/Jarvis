@@ -74,6 +74,18 @@ POST /internal/arc-light
   "quietHoursStart": 22, "quietHoursEnd": 7 }
 ```
 
+In ordinary use it is controlled by `scripts/arc-light.sh`, which reads the
+token from `.env` so nobody has to handle a credential by hand:
+
+```sh
+./scripts/arc-light.sh off
+./scripts/arc-light.sh dim
+./scripts/arc-light.sh on            # normal
+./scripts/arc-light.sh on 20 60      # custom idle and active percent
+./scripts/arc-light.sh bright
+./scripts/arc-light.sh status
+```
+
 The light is **off by default**. A light at a front door that switches itself
 on is the owner's decision, not the firmware's.
 
