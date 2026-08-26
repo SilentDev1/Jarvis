@@ -20,7 +20,10 @@ from .terminal_state import TerminalState
 
 logger = logging.getLogger("jarvis_home.voice_loop")
 
-DEFAULT_LISTEN_MS = 6000
+# Upper bound only. Endpointing ends the turn as soon as the speaker stops, so
+# a generous ceiling costs nothing and stops a visitor being cut off when they
+# pause mid-sentence.
+DEFAULT_LISTEN_MS = 15000
 
 # Kept short on purpose: this is spoken aloud at a front door, not read.
 # The shared AIProvider requests JSON from the model, so the reply must be

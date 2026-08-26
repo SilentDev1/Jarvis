@@ -19,8 +19,8 @@
 /* Microphone capture bounds. A door-terminal utterance is short, so capping
  * the duration stops a wedged session from streaming audio indefinitely. */
 #define AUDIO_MIC_CHUNK_BYTES 1024
-#define AUDIO_MIC_DEFAULT_MS 5000
-#define AUDIO_MIC_MAX_MS 15000
+#define AUDIO_MIC_DEFAULT_MS 15000
+#define AUDIO_MIC_MAX_MS 20000
 
 /* A stalled stream must never hold the amplifier open. */
 #define AUDIO_STREAM_TIMEOUT_MS 10000

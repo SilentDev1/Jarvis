@@ -1,17 +1,20 @@
 import asyncio
 import contextlib
 import json
+import logging
 import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
+from ..core.speech_input import rms
 from ..persistence import Device, utcnow
 from .arc_reactor import ArcReactorController
 from .audio_stream import (
     AUDIO_MAX_STREAM_BYTES,
     AUDIO_SAMPLE_BYTES,
+    AUDIO_SAMPLE_RATE,
     AudioStreamError,
     OutboundAudioStream,
     chunk_payload,
@@ -22,6 +25,37 @@ from .audio_stream import (
 from .firmware_release import is_newer
 from .ota import UPDATABLE_STATES, OtaState, OtaStatus
 from .terminal_state import TerminalState, TerminalStateMachine
+
+# Endpointing. A fixed window is the worst of both worlds: too short and it
+# cuts a visitor off mid-sentence, too long and everyone waits out dead air
+# after they have finished. Listen generously, but stop as soon as they stop.
+ENDPOINT_SILENCE_SECONDS = 0.9
+# Require some real speech before trusting silence, so a breath or a gap
+# before someone starts does not end the turn immediately.
+ENDPOINT_MIN_SPEECH_SECONDS = 0.3
+# If nothing at all is heard, give up well before the maximum.
+ENDPOINT_NO_SPEECH_SECONDS = 5.0
+# Speech is detected relative to the loudest audio in the turn.
+#
+# A fixed absolute threshold cannot work: the measured room level at this door
+# was 0.041, seven times the nominal silence level, so nothing ever counted as
+# silence and every turn ran to its full ceiling. Learning a floor from the
+# quietest audio fails differently: a visitor who starts talking the instant
+# the microphone opens sets the floor to their own voice, and then nothing
+# clears it.
+#
+# Measuring against the peak handles both. Speech is whatever is close to the
+# loudest thing heard; silence is whatever is well below it.
+ENDPOINT_VOICE_FACTOR = 0.30
+# A turn only contains speech if it has real dynamic range. Without this, a
+# uniformly noisy room would have its own hum treated as speech, because the
+# hum is by definition the loudest thing present.
+ENDPOINT_DYNAMIC_RANGE = 2.0
+# Absolute floor, so a genuinely silent room does not scale the threshold down
+# until noise reads as speech.
+ENDPOINT_MIN_FLOOR = 0.004
+
+logger = logging.getLogger("jarvis_home.local_protocol")
 
 PROTOCOL_VERSION = 1
 SUBPROTOCOL = "jarvis.device.v1"
@@ -134,6 +168,8 @@ class LocalDeviceHub:
         self._mic_bytes = 0
         self._mic_done: asyncio.Event | None = None
         self._mic_reason: str | None = None
+        # Per-chunk (seconds, level), classified at decision time.
+        self._mic_levels: list[tuple[float, float]] = []
         # Signalled when the device reports playback actually finished. The
         # host finishes sending long before the device finishes playing.
         self._playback_done: asyncio.Event | None = None
@@ -286,6 +322,55 @@ class LocalDeviceHub:
         self._mic_sequence += 1
         self._mic_bytes += len(chunk.payload)
         self._mic_chunks.append(chunk.payload)
+        # Track speech and trailing silence so the turn can end when the
+        # visitor does. Cheap: one RMS over a 32 ms chunk.
+        seconds = len(chunk.payload) / (AUDIO_SAMPLE_RATE * AUDIO_SAMPLE_BYTES)
+        # Record the level and decide later. Whether a chunk is speech depends
+        # on the loudest and quietest audio in the whole turn, and neither is
+        # known when the first chunk arrives: classifying on arrival meant a
+        # visitor who started talking immediately was never heard at all.
+        self._mic_levels.append((seconds, rms(chunk.payload)))
+
+    def _speech_profile(self) -> tuple[float, float, float]:
+        """Voice seconds, trailing silence seconds, and the peak level.
+
+        Computed over the whole turn rather than incrementally, because
+        whether a chunk is speech depends on the loudest and quietest audio
+        present and neither is known while the first chunks are arriving.
+        """
+        if not self._mic_levels:
+            return 0.0, 0.0, 0.0
+        levels = [level for _, level in self._mic_levels]
+        peak, floor = max(levels), min(levels)
+        # A turn only contains speech if it has real dynamic range. Without
+        # this a uniformly noisy room would treat its own hum as a person,
+        # because the hum is by definition the loudest thing present.
+        if peak <= max(floor * ENDPOINT_DYNAMIC_RANGE, ENDPOINT_MIN_FLOOR):
+            return 0.0, sum(seconds for seconds, _ in self._mic_levels), peak
+        threshold = max(peak * ENDPOINT_VOICE_FACTOR, ENDPOINT_MIN_FLOOR)
+        voice = sum(s for s, level in self._mic_levels if level > threshold)
+        trailing = 0.0
+        for seconds, level in reversed(self._mic_levels):
+            if level > threshold:
+                break
+            trailing += seconds
+        return voice, trailing, peak
+
+    def _endpoint_reason(self) -> str | None:
+        """Whether the visitor has finished, and why.
+
+        Ending on trailing silence is what makes the terminal feel responsive:
+        a fixed window either truncates someone mid-sentence or makes everyone
+        wait out dead air after they stop.
+        """
+        elapsed = self._mic_bytes / (AUDIO_SAMPLE_RATE * AUDIO_SAMPLE_BYTES)
+        voice, trailing, _ = self._speech_profile()
+        if (voice >= ENDPOINT_MIN_SPEECH_SECONDS
+                and trailing >= ENDPOINT_SILENCE_SECONDS):
+            return "endpoint_silence"
+        if voice < ENDPOINT_MIN_SPEECH_SECONDS and elapsed >= ENDPOINT_NO_SPEECH_SECONDS:
+            return "no_speech"
+        return None
 
     async def listen(self, max_milliseconds: int = 5000,
                      stream_id: int = 1) -> bytes:
@@ -318,22 +403,42 @@ class LocalDeviceHub:
             raise AudioStreamError("mic_stream_already_active")
 
         self._reset_microphone()
+        self._mic_levels = []
         self._mic_stream_id = stream_id
         self._mic_reason = None
         self._mic_done = asyncio.Event()
         await self.sync_visual()
         await self.send("LISTEN_START", streamId=stream_id,
                         maxMilliseconds=max_milliseconds)
+        deadline = time.monotonic() + (max_milliseconds / 1000) + 5
         try:
-            # Allow the device its full budget plus slack for teardown, then
-            # give up rather than waiting forever on a silent device.
-            await asyncio.wait_for(
-                self._mic_done.wait(), timeout=(max_milliseconds / 1000) + 5
-            )
-        except TimeoutError:
-            self._mic_reason = "host_timeout"
+            while not self._mic_done.is_set():
+                if time.monotonic() > deadline:
+                    self._mic_reason = "host_timeout"
+                    with contextlib.suppress(Exception):
+                        await self.send("LISTEN_STOP", streamId=stream_id)
+                    break
+                reason = self._endpoint_reason()
+                if reason:
+                    logger.info(
+                        "listen ended: %s after %.1fs (voice %.1fs, peak %.4f)",
+                        reason,
+                        self._mic_bytes / (AUDIO_SAMPLE_RATE * AUDIO_SAMPLE_BYTES),
+                        self._speech_profile()[0],
+                        self._speech_profile()[2],
+                    )
+                    self._mic_reason = reason
+                    with contextlib.suppress(Exception):
+                        await self.send("LISTEN_STOP", streamId=stream_id)
+                    # Let the device finish its teardown and flush the tail.
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._mic_done.wait(), timeout=2.0)
+                    break
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await self.send("LISTEN_STOP", streamId=stream_id)
+            raise
         finally:
             audio = b"".join(self._mic_chunks)
             self._reset_microphone()

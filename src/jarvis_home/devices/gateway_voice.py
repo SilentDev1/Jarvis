@@ -31,7 +31,7 @@ HEALTH_TIMEOUT_SECONDS = 3.0
 
 class AiPiGatewayVoice(VoiceTerminalProvider):
     def __init__(self, base_url: str, admin_token: str,
-                 listen_milliseconds: int = 6000):
+                 listen_milliseconds: int = 15000):
         self.base_url = base_url.rstrip("/")
         self.admin_token = admin_token
         self.listen_milliseconds = listen_milliseconds

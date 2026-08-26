@@ -25,7 +25,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "1.3.0-auto-visual"
+#define FIRMWARE_VERSION "1.4.0-endpointing"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the

@@ -123,6 +123,21 @@ async def _button_voice_turn():
         logger.exception("button voice turn failed")
 
 
+async def _warm_recognition() -> None:
+    """Loads the speech model before anyone needs it.
+
+    Cold-loading costs about 1.6 seconds more than a warm pass, and the visitor
+    who would pay it is the first real one to speak. Done in the background so
+    it never delays startup, and failure is not fatal: the model would simply
+    load lazily as before.
+    """
+    try:
+        await asyncio.to_thread(stt._load)
+        logger.info("speech recognition model warmed")
+    except Exception:  # noqa: BLE001 - warm-up is best effort, never fatal
+        logger.warning("speech model warm-up failed; it will load on first use")
+
+
 @asynccontextmanager
 async def lifespan(_app):
     hub.on_button_pressed = _button_voice_turn
@@ -130,6 +145,7 @@ async def lifespan(_app):
     logger.info("arc light preference loaded: enabled=%s", hub.arc_settings.enabled)
     hub.mark_offline()
     task = asyncio.create_task(heartbeat_loop())
+    warm = asyncio.create_task(_warm_recognition())
     # Broadcast discovery, so the terminal can find Jarvis without multicast.
     discovery = await start_discovery_responder(
         int(os.environ.get("LOCAL_DEVICE_GATEWAY_PORT", "8767"))
@@ -138,7 +154,8 @@ async def lifespan(_app):
     if discovery is not None:
         discovery.close()
     task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    warm.cancel()
+    await asyncio.gather(task, warm, return_exceptions=True)
 
 
 app = FastAPI(title="Jarvis Local Device Gateway", docs_url=None, redoc_url=None,
@@ -231,8 +248,8 @@ async def listen(request: Request):
     """
     _authorize_loopback_admin(request)
     payload = await request.json() if await request.body() else {}
-    milliseconds = int(payload.get("milliseconds", 5000))
-    if not 500 <= milliseconds <= 15000:
+    milliseconds = int(payload.get("milliseconds", 15000))
+    if not 500 <= milliseconds <= 20000:
         raise HTTPException(status_code=400, detail="out_of_range")
 
     hub.terminal.transition(TerminalState.LISTENING)
@@ -273,7 +290,7 @@ async def voice_turn(request: Request):
     _authorize_loopback_admin(request)
     payload = await request.json() if await request.body() else {}
     milliseconds = int(payload.get("milliseconds", 6000))
-    if not 500 <= milliseconds <= 15000:
+    if not 500 <= milliseconds <= 20000:
         raise HTTPException(status_code=400, detail="out_of_range")
     try:
         turn = await voice_loop.run_turn(listen_milliseconds=milliseconds)
