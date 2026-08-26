@@ -18,7 +18,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.4.3-mic-timing"
+#define FIRMWARE_VERSION "0.5.1-mic-gain"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -194,6 +194,15 @@ static void process_audio_frame(esp_websocket_event_data_t *event,
  * footprint fixed instead of stack-dependent. */
 static uint8_t capture_chunk[AUDIO_MIC_CHUNK_BYTES];
 static uint8_t capture_frame[AUDIO_FRAME_HEADER_BYTES + AUDIO_MIC_CHUNK_BYTES];
+
+/* Reports actual end-of-playback to Jarvis. Runs on the audio path, so it only
+ * queues a small control message and does no work of its own. */
+static void on_playback_finished(uint32_t bytes, const char *reason) {
+    cJSON *done = base_message("AUDIO_DONE");
+    cJSON_AddNumberToObject(done, "bytes", bytes);
+    cJSON_AddStringToObject(done, "reason", reason ? reason : "complete");
+    send_json(done);
+}
 
 static void capture_task(void *unused) {
     (void)unused;
@@ -435,6 +444,7 @@ esp_err_t local_connection_start(void) {
     memset(authorization, 0, sizeof(authorization));
     memset(provisioned.device_password, 0, sizeof(provisioned.device_password));
     if (result != ESP_OK) return result;
+    audio_playback_set_finished_callback(on_playback_finished);
     ESP_ERROR_CHECK(esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event, NULL));
     if (xTaskCreate(reconnect_task, "jarvis_reconnect", 4096, NULL, 5,
                     &reconnect_task_handle) != pdPASS) {

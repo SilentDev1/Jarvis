@@ -126,6 +126,9 @@ class LocalDeviceHub:
         self._mic_bytes = 0
         self._mic_done: asyncio.Event | None = None
         self._mic_reason: str | None = None
+        # Signalled when the device reports playback actually finished. The
+        # host finishes sending long before the device finishes playing.
+        self._playback_done: asyncio.Event | None = None
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -207,7 +210,20 @@ class LocalDeviceHub:
                 self.arc.observe_audio(payload)
                 await self.websocket.send_bytes(stream.next_chunk(payload))
             summary = stream.end_message()
+            self._playback_done = asyncio.Event()
             await self.send("AUDIO_END", **summary)
+            # Wait for the device to report real end-of-playback. Leaving
+            # SPEAKING when the last byte was merely *sent* would reopen the
+            # microphone while the speaker is still running, and the terminal
+            # would transcribe its own voice. Fall back to the audio's own
+            # duration if the device never reports.
+            expected = duration_seconds(len(pcm))
+            try:
+                await asyncio.wait_for(
+                    self._playback_done.wait(), timeout=expected + 5
+                )
+            except TimeoutError:
+                pass
         except Exception as error:
             # Best effort: if the socket is already gone the device aborts on
             # its own disconnect path.
@@ -216,6 +232,7 @@ class LocalDeviceHub:
             raise
         finally:
             self._audio_active = False
+            self._playback_done = None
             # Leaving SPEAKING starts the settling delay before the microphone
             # may reopen, on the success and the failure path alike.
             self.terminal.transition(TerminalState.IDLE)
@@ -260,9 +277,19 @@ class LocalDeviceHub:
         if self.terminal.state is not TerminalState.LISTENING:
             raise AudioStreamError("not_listening")
         if not self.terminal.microphone_allowed():
-            # The speech tail has not decayed yet; opening now would transcribe
-            # Jarvis's own voice.
-            raise AudioStreamError("microphone_not_settled")
+            # The speech tail has not decayed yet. Wait it out rather than
+            # failing: in the normal conversational flow listening always
+            # follows speaking, so the delay is expected, not an error. The
+            # safety property is that the microphone does not open early, and
+            # waiting satisfies it. Bounded so a stuck clock cannot hang here.
+            remaining = self.terminal.settle_seconds
+            if self.terminal.last_speaking_ended_at is not None:
+                remaining = self.terminal.settle_seconds - (
+                    time.monotonic() - self.terminal.last_speaking_ended_at
+                )
+            await asyncio.sleep(max(0.0, min(remaining, self.terminal.settle_seconds)))
+            if not self.terminal.microphone_allowed():
+                raise AudioStreamError("microphone_not_settled")
         if self._mic_stream_id is not None:
             raise AudioStreamError("mic_stream_already_active")
 
@@ -297,6 +324,10 @@ class LocalDeviceHub:
 
     def _handle_microphone_message(self, value: dict) -> bool:
         kind = value.get("type")
+        if kind == "AUDIO_DONE":
+            if self._playback_done is not None:
+                self._playback_done.set()
+            return True
         if kind == "MIC_BEGIN":
             # Format is validated even though the device generated it; a device
             # reporting an unexpected format must not silently corrupt STT.

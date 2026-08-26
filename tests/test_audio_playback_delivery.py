@@ -1,4 +1,8 @@
+import asyncio
+
 """Delivery guards for streamed playback and the operator playback controls."""
+
+import json
 
 import pytest
 
@@ -12,13 +16,25 @@ from jarvis_home.devices.terminal_state import TerminalState
 
 
 class FakeSocket:
-    def __init__(self, fail_on_bytes=False):
+    """Stands in for the device, including reporting end-of-playback.
+
+    A real device answers AUDIO_END with AUDIO_DONE once the speaker has
+    actually finished. Without that the hub correctly waits out its timeout, so
+    the fake must complete too or every test pays the full wait.
+    """
+
+    def __init__(self, fail_on_bytes=False, report_done=True):
         self.text = []
         self.binary = []
         self.fail_on_bytes = fail_on_bytes
+        self.report_done = report_done
+        self.hub = None
 
     async def send_text(self, value):
         self.text.append(value)
+        if (self.report_done and self.hub is not None
+                and json.loads(value)["type"] == "AUDIO_END"):
+            self.hub._playback_done.set()
 
     async def send_bytes(self, value):
         if self.fail_on_bytes:
@@ -62,12 +78,12 @@ def make_hub(ready=True, socket=None):
     # attach() puts a real connected device in IDLE; these tests set the socket
     # directly, so mirror that rather than leaving the hub in BOOTING.
     hub.terminal.transition(TerminalState.IDLE)
+    if isinstance(hub.websocket, FakeSocket):
+        hub.websocket.hub = hub
     return hub
 
 
 def types_sent(socket):
-    import json
-
     return [json.loads(item)["type"] for item in socket.text]
 
 
@@ -174,3 +190,61 @@ async def test_playback_never_touches_persistence():
     before = hub.store.sessions
     await hub.play_pcm(b"\x01\x02" * 500)
     assert hub.store.sessions == before
+
+
+@pytest.mark.asyncio
+async def test_playback_waits_for_the_device_to_finish_not_just_for_sending():
+    # The host finishes sending in milliseconds while the device plays for
+    # seconds. Leaving SPEAKING early would reopen the microphone into Jarvis's
+    # own voice.
+    socket = FakeSocket(report_done=False)
+    hub = make_hub(socket=socket)
+    hub.terminal.settle_seconds = 0
+
+    async def complete_later():
+        await asyncio.sleep(0.05)
+        assert hub.terminal.state is TerminalState.SPEAKING, (
+            "left SPEAKING before the device reported completion"
+        )
+        hub._playback_done.set()
+
+    waiter = asyncio.create_task(complete_later())
+    await hub.play_pcm(b"\x01\x02" * 100)
+    await waiter
+    assert hub.terminal.state is TerminalState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_playback_falls_back_if_the_device_never_reports_completion():
+    # A device that dies mid-utterance must not wedge SPEAKING forever.
+    socket = FakeSocket(report_done=False)
+    hub = make_hub(socket=socket)
+    audio = b"\x01\x02" * 100
+    import jarvis_home.devices.local_protocol as protocol
+
+    original = protocol.duration_seconds
+    protocol.duration_seconds = lambda _b: -4.9  # forces an immediate timeout
+    try:
+        await hub.play_pcm(audio)
+    finally:
+        protocol.duration_seconds = original
+    assert hub.terminal.state is TerminalState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_listen_waits_out_the_settle_delay_instead_of_failing():
+    # Listening always follows speaking in a conversation, so the settle delay
+    # is expected rather than an error; the microphone still must not open early.
+    hub = make_hub()
+    hub.terminal.settle_seconds = 0.05
+    await hub.play_pcm(b"\x01\x02" * 50)
+    hub.terminal.transition(TerminalState.LISTENING)
+    assert hub.terminal.microphone_allowed() is False
+
+    async def finish():
+        await asyncio.sleep(0.01)
+        hub._mic_done.set()
+
+    asyncio.create_task(finish())
+    await hub.listen(max_milliseconds=500)
+    assert hub.terminal.microphone_allowed() is True

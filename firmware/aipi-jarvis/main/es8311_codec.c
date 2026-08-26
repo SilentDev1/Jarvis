@@ -176,8 +176,23 @@ esp_err_t es8311_codec_initialize_input(void) {
     ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x14, 0x1A), TAG, "mic select");
     /* 0x17: ADC digital volume. Conservative: enough level for speech without
      * clipping close talkers at the door. */
+    /* 0x16: ADC PGA gain scale. Espressif's reference sets this and the first
+     * implementation omitted it, which left the analog front end near unity and
+     * captured close to the noise floor. 0x05 is the reference's 30 dB step. */
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x16, 0x05), TAG, "ADC gain");
     ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x17, 0xBF), TAG, "ADC volume");
     input_initialized = true;
+
+    /* Read the ADC registers back rather than trusting the writes. A silent or
+     * quiet microphone is otherwise indistinguishable from a register that did
+     * not take. */
+    static const uint8_t audit[] = {0x14, 0x15, 0x16, 0x17, 0x1B, 0x1C};
+    for (size_t i = 0; i < sizeof(audit) / sizeof(audit[0]); ++i) {
+        uint8_t value = 0;
+        if (es8311_codec_read_register(audit[i], &value) == ESP_OK) {
+            ESP_LOGI(TAG, "ADC register 0x%02X = 0x%02X", audit[i], value);
+        }
+    }
     ESP_LOGI(TAG, "ES8311 microphone input PASS rate=16000 PCM16 analog-mic");
     return ESP_OK;
 }

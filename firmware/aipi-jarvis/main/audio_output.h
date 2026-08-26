@@ -35,6 +35,11 @@ bool audio_output_manual_test_enabled(void);
  * The amplifier is enabled by begin() and is guaranteed to be disabled again by
  * end(), by abort(), by any failing write, and by the stall watchdog. Callers
  * do not touch GPIO9 directly. */
+/* Invoked when playback actually finishes on the device, which is much later
+ * than when the host finishes sending. */
+typedef void (*audio_playback_finished_fn)(uint32_t bytes, const char *reason);
+void audio_playback_set_finished_callback(audio_playback_finished_fn callback);
+
 esp_err_t audio_playback_begin(uint32_t sample_rate, uint8_t channels,
                                uint8_t bits_per_sample, uint32_t expected_bytes);
 esp_err_t audio_playback_write(const uint8_t *pcm, size_t bytes);

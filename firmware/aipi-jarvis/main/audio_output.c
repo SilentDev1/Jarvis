@@ -23,6 +23,11 @@ static const char *TAG = "jarvis_audio";
 static i2s_chan_handle_t tx_channel;
 static i2s_chan_handle_t rx_channel;
 static bool capturing;
+static audio_playback_finished_fn audio_playback_finished_cb;
+
+void audio_playback_set_finished_callback(audio_playback_finished_fn callback) {
+    audio_playback_finished_cb = callback;
+}
 static SemaphoreHandle_t playback_lock;
 static bool initialized;
 static bool playing;
@@ -282,8 +287,14 @@ esp_err_t audio_playback_end(void) {
     vTaskDelay(pdMS_TO_TICKS(25));
     ESP_LOGI(TAG, "playback END bytes=%lu result=%s",
              (unsigned long)stream_written_bytes, esp_err_to_name(result));
+    uint32_t played = stream_written_bytes;
     stream_reset();
     stop();
+    /* Tell the host playback has actually finished. The host finishes sending
+     * long before the device finishes playing, so without this it would leave
+     * SPEAKING while the speaker is still running and could open the
+     * microphone into Jarvis's own voice. */
+    if (audio_playback_finished_cb) audio_playback_finished_cb(played, "complete");
     return result;
 }
 
@@ -292,10 +303,14 @@ void audio_playback_abort(const char *reason) {
     ESP_LOGW(TAG, "playback ABORT reason=%s bytes=%lu",
              reason ? reason : "unspecified",
              (unsigned long)stream_written_bytes);
+    uint32_t played = stream_written_bytes;
     stream_reset();
     /* stop() mutes the codec, drops GPIO9, disables the channel and releases
      * the lock, so the amplifier is off on every abort path. */
     stop();
+    if (audio_playback_finished_cb) {
+        audio_playback_finished_cb(played, reason ? reason : "aborted");
+    }
 }
 
 void audio_playback_poll_timeout(void) {
