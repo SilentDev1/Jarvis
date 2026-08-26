@@ -33,6 +33,7 @@ from .devices.auth import (
     issue_device_token,
     revoke_device_tokens,
 )
+from .devices.gateway_voice import AiPiGatewayVoice
 from .devices.voice_protocol import (
     SUBPROTOCOL,
     AiPiLocalVoice,
@@ -119,7 +120,12 @@ except Exception:  # noqa: BLE001 - optional provider import/model failures must
 ai = OllamaAI(cfg.ollama_url, cfg.ollama_model)
 local_voice_hub = LocalVoiceHub(bus)
 voice: VoiceTerminalProvider
-if cfg.voice_satellite == "aipi_local":
+if cfg.voice_satellite == "aipi_gateway":
+    # The physically validated path: authenticated LAN WebSocket, bounded PCM,
+    # half-duplex gating, and local recognition, reached over loopback because
+    # the device gateway runs as its own process.
+    voice = AiPiGatewayVoice(cfg.local_device_gateway_url, cfg.jarvis_admin_token)
+elif cfg.voice_satellite == "aipi_local":
     voice = AiPiLocalVoice(local_voice_hub, MacSayTTS())
 elif cfg.voice_satellite == "aipi_stock":
     voice = StockAiPiVoice()

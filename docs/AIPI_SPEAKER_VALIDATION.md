@@ -385,8 +385,11 @@ Voice turns were invisible in the log. uvicorn configures only its own loggers,
 so application records were dropped. A door terminal needs its turns logged, or
 a wrong answer leaves no trace to diagnose.
 
-## Still outstanding
+## Owner confirmation
 
-The owner has not yet confirmed hearing the spoken reply for this specific
-turn, so this is recorded as a software PASS. Camera-triggered greeting,
-multi-turn visitor sessions, and false-activation testing are separate phases.
+The owner heard the spoken reply clearly, so this is a full physical PASS:
+press, question, and audible answer, entirely on the LAN with no cloud
+dependency.
+
+Camera-triggered greeting, multi-turn visitor sessions, and false-activation
+testing remain separate phases.

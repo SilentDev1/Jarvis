@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     presence_freshness_seconds: float = Field(3, ge=1, le=15)
     presence_hold_seconds: float = Field(2.5, ge=0, le=10)
     voice_satellite: str = "simulator"
+    local_device_gateway_url: str = "http://127.0.0.1:8767"
     visitor_listen_timeout_seconds: float = Field(15, ge=3, le=120)
     visitor_conversation_max_seconds: float = Field(120, ge=15, le=600)
     visitor_conversation_max_turns: int = Field(8, ge=1, le=20)
@@ -78,9 +79,12 @@ class Settings(BaseSettings):
     @field_validator("voice_satellite")
     @classmethod
     def voice_satellite_ok(cls, v):
-        if v not in {"simulator", "aipi_stock", "aipi_local"}:
+        # aipi_gateway drives the physically validated device gateway path.
+        # aipi_local drives the older, never-hardware-validated protocol.
+        if v not in {"simulator", "aipi_stock", "aipi_local", "aipi_gateway"}:
             raise ValueError(
-                "VOICE_SATELLITE must be simulator, aipi_stock, or aipi_local"
+                "VOICE_SATELLITE must be simulator, aipi_stock, aipi_local, "
+                "or aipi_gateway"
             )
         return v
 
