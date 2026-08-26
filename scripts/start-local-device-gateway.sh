@@ -36,6 +36,11 @@ if ! mkdir "$lock_dir" 2>/dev/null; then
   mkdir "$lock_dir"
 fi
 echo $$ > "$lock_dir/pid"
+# Publish the supervisor pid where start.sh, stop.sh and status.sh look. When a
+# second start is refused by the lock, start.sh would otherwise record the
+# refused shell's pid and status.sh would report the gateway STOPPED while it
+# was running.
+echo $$ > run/local-device-gateway.pid
 
 cleanup() {
   status=$?
@@ -52,6 +57,9 @@ cleanup() {
   [ -z "$app_pid" ] || kill -9 "$app_pid" 2>/dev/null || true
   [ -z "$mdns_pid" ] || kill -9 "$mdns_pid" 2>/dev/null || true
   rm -rf "$lock_dir"
+  # Only clear the shared pidfile if it still refers to this supervisor.
+  [ "$(cat run/local-device-gateway.pid 2>/dev/null)" = "$$" ] &&
+    rm -f run/local-device-gateway.pid
   log "stopped"
   exit $status
 }

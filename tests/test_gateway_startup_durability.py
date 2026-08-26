@@ -113,3 +113,13 @@ def test_every_env_variant_is_ignored_except_the_example():
     ignore = (ROOT / ".gitignore").read_text()
     assert ".env.*" in ignore
     assert "!.env.example" in ignore
+
+
+def test_supervisor_publishes_its_pid_where_the_service_scripts_look():
+    # start.sh records the pid of whatever it launched. When a second start is
+    # refused by the lock, that pid is the refused shell, and status.sh then
+    # reports the gateway STOPPED while it is running.
+    text = SUPERVISOR.read_text()
+    assert "echo $$ > run/local-device-gateway.pid" in text
+    # It must only be cleared by the supervisor that owns it.
+    assert 'cat run/local-device-gateway.pid 2>/dev/null)" = "$$"' in text
