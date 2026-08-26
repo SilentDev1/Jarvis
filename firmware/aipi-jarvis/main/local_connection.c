@@ -14,6 +14,9 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
+#include <lwip/inet.h>
 #include "esp_websocket_client.h"
 #include "jarvis_protocol.h"
 #include "wifi_provision.h"
@@ -21,7 +24,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "1.0.1-jarvis-hud"
+#define FIRMWARE_VERSION "1.1.1-jarvis-hud"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -572,6 +575,62 @@ bool local_connection_button_pressed(void) {
     return true;
 }
 
+/* Finds Jarvis by UDP broadcast.
+ *
+ * mDNS stopped reaching this device when the host moved from wireless to
+ * wired: multicast did not cross the segments and the terminal sat online but
+ * unable to find Jarvis. Broadcast is forwarded as ordinary link-layer traffic
+ * within the subnet, so it survives that. */
+#define DISCOVERY_PORT 8768
+#define DISCOVERY_PROBE "JARVIS-DISCOVER-V1"
+#define DISCOVERY_ATTEMPTS 3
+#define DISCOVERY_TIMEOUT_MS 900
+
+static bool discover_gateway(char *out, size_t size) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return false;
+    int broadcast = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    struct timeval timeout = {
+        .tv_sec = DISCOVERY_TIMEOUT_MS / 1000,
+        .tv_usec = (DISCOVERY_TIMEOUT_MS % 1000) * 1000,
+    };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in destination = {
+        .sin_family = AF_INET,
+        .sin_port = htons(DISCOVERY_PORT),
+        .sin_addr.s_addr = htonl(INADDR_BROADCAST),
+    };
+    bool found = false;
+    for (int attempt = 0; attempt < DISCOVERY_ATTEMPTS && !found; ++attempt) {
+        sendto(sock, DISCOVERY_PROBE, strlen(DISCOVERY_PROBE), 0,
+               (struct sockaddr *)&destination, sizeof(destination));
+        char reply[160];
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int received = recvfrom(sock, reply, sizeof(reply) - 1, 0,
+                                (struct sockaddr *)&from, &from_len);
+        if (received <= 0) continue;
+        reply[received] = '\0';
+        cJSON *root = cJSON_Parse(reply);
+        if (!root) continue;
+        const cJSON *service = cJSON_GetObjectItemCaseSensitive(root, "service");
+        const cJSON *host = cJSON_GetObjectItemCaseSensitive(root, "host");
+        /* Only accept a reply that identifies itself as our gateway; the
+         * socket is open to the LAN and anything may answer. */
+        if (cJSON_IsString(service) && cJSON_IsString(host) &&
+            !strcmp(service->valuestring, "jarvis-device-gateway") &&
+            strlen(host->valuestring) < size) {
+            snprintf(out, size, "%s", host->valuestring);
+            found = true;
+        }
+        cJSON_Delete(root);
+    }
+    close(sock);
+    return found;
+}
+
 esp_err_t local_connection_start(void) {
     jarvis_local_config_t provisioned;
     if (!wifi_provision_load_jarvis_config(&provisioned)) {
@@ -579,8 +638,41 @@ esp_err_t local_connection_start(void) {
         bringup_display_status("JARVIS", "WI-FI: OK", "JARVIS: SETUP");
         return ESP_ERR_NOT_FOUND;
     }
+    /* Resolve the configured host ourselves rather than leaving it to the
+     * websocket client.
+     *
+     * mDNS resolution of a .local name fails intermittently on this hardware,
+     * and when it does the terminal sits on Wi-Fi, pingable, unable to find
+     * Jarvis, and needs a power cycle. Resolving here lets us fall back to the
+     * address that last worked, so a multicast hiccup cannot strand a device
+     * mounted at a front door. */
+    char target[96];
+    snprintf(target, sizeof(target), "%.*s",
+             (int)(sizeof(provisioned.host) - 1), provisioned.host);
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *found = NULL;
+    if (getaddrinfo(provisioned.host, NULL, &hints, &found) == 0 && found) {
+        struct in_addr addr = ((struct sockaddr_in *)found->ai_addr)->sin_addr;
+        inet_ntoa_r(addr, target, sizeof(target));
+        wifi_provision_store_gateway_ip(target);
+        ESP_LOGI(TAG, "resolved %s -> %s", provisioned.host, target);
+    } else if (discover_gateway(target, sizeof(target))) {
+        /* Broadcast discovery, which crosses wired and wireless segments that
+         * multicast may not. */
+        wifi_provision_store_gateway_ip(target);
+        ESP_LOGI(TAG, "%s did not resolve; discovered gateway at %s",
+                 provisioned.host, target);
+    } else if (wifi_provision_cached_gateway_ip(target, sizeof(target))) {
+        ESP_LOGW(TAG, "%s did not resolve; using last known gateway %s",
+                 provisioned.host, target);
+    } else {
+        ESP_LOGW(TAG, "%s did not resolve, discovery found nothing, "
+                      "and no cached address is known", provisioned.host);
+    }
+    if (found) freeaddrinfo(found);
+
     char uri[128];
-    snprintf(uri, sizeof(uri), "ws://%s:%u/ws/device", provisioned.host, provisioned.port);
+    snprintf(uri, sizeof(uri), "ws://%s:%u/ws/device", target, provisioned.port);
     esp_websocket_client_config_t config = {
         .uri = uri,
         .subprotocol = "jarvis.device.v1",

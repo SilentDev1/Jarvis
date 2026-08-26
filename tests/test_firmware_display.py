@@ -133,3 +133,34 @@ def test_reconnect_loop_is_supervisory_not_purely_edge_triggered():
     assert "portMAX_DELAY" not in task
     assert "RECONNECT_SUPERVISE_MS" in task
     assert "esp_websocket_client_is_connected" in task
+
+
+def test_gateway_hostname_resolution_has_a_cached_fallback():
+    # mDNS resolution of the .local name fails intermittently on this
+    # hardware. When it does the terminal sits on Wi-Fi, pingable, unable to
+    # find Jarvis, and needs a power cycle. Observed in practice.
+    connection = read("local_connection.c")
+    assert "getaddrinfo(provisioned.host" in connection
+    assert "wifi_provision_cached_gateway_ip" in connection
+    assert "wifi_provision_store_gateway_ip" in connection
+    assert "using last known gateway" in connection
+    # The resolved address must be what the socket actually uses.
+    assert 'snprintf(uri, sizeof(uri), "ws://%s:%u/ws/device", target' in connection
+
+
+def test_cached_gateway_address_is_not_rewritten_every_connection():
+    # NVS has finite erase cycles and this runs on every successful connect.
+    provision = read("wifi_provision.c")
+    store = provision.split("void wifi_provision_store_gateway_ip(", 1)[1]
+    assert "strcmp(existing, ip) == 0" in store
+
+
+def test_pixel_stream_raises_the_data_line_before_sending():
+    # lcd_window ends on RAMWR with no payload, so lcd_tx returns with DC still
+    # low. Without raising it the whole framebuffer is clocked in as commands
+    # and the panel shows a blank screen with no error anywhere.
+    bringup = read("bringup.c")
+    flush = bringup.split("static void lcd_flush(", 1)[1].split("\n}", 1)[0]
+    assert "gpio_set_level(AIPI_LCD_DC, 1)" in flush
+    assert flush.index("lcd_window(") < flush.index("gpio_set_level(AIPI_LCD_DC, 1)")
+    assert flush.index("gpio_set_level(AIPI_LCD_DC, 1)") < flush.index("spi_device_polling_transmit")

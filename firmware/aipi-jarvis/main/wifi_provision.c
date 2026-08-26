@@ -383,3 +383,29 @@ esp_err_t wifi_provision_start(void) {
 }
 
 wifi_provision_status_t wifi_provision_status(void) { return status; }
+
+#define GATEWAY_IP_KEY "gw_ip"
+
+bool wifi_provision_cached_gateway_ip(char *out, size_t size) {
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+    size_t length = size;
+    esp_err_t result = nvs_get_str(handle, GATEWAY_IP_KEY, out, &length);
+    nvs_close(handle);
+    return result == ESP_OK && out[0] != '\0';
+}
+
+void wifi_provision_store_gateway_ip(const char *ip) {
+    if (!ip || !ip[0]) return;
+    char existing[48] = {0};
+    /* Only write when the address actually changed; NVS has finite erase
+     * cycles and this runs on every successful connection. */
+    if (wifi_provision_cached_gateway_ip(existing, sizeof(existing)) &&
+        strcmp(existing, ip) == 0) {
+        return;
+    }
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_str(handle, GATEWAY_IP_KEY, ip) == ESP_OK) nvs_commit(handle);
+    nvs_close(handle);
+}

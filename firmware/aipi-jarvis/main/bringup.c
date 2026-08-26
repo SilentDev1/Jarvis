@@ -108,6 +108,10 @@ static uint16_t flush_scratch[FLUSH_CHUNK_PIXELS];
 static void lcd_flush(const uint16_t *framebuffer) {
     if (!lcd || !framebuffer) return;
     lcd_window(0, 0, DISPLAY_W - 1, DISPLAY_H - 1);
+    /* lcd_window ends on RAMWR with no payload, so lcd_tx returns with DC
+     * still low. Raise it before the pixel stream or every byte is clocked in
+     * as a command and the panel shows a blank screen with no error. */
+    gpio_set_level(AIPI_LCD_DC, 1);
     const int total = DISPLAY_W * DISPLAY_H;
     for (int offset = 0; offset < total; offset += FLUSH_CHUNK_PIXELS) {
         int count = total - offset;

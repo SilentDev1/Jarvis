@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import secrets
 import sys
 import time
@@ -30,6 +31,7 @@ from .audio_stream import (
     validate_format,
 )
 from .auth import authenticate_device
+from .discovery import start_discovery_responder
 from .firmware_release import (
     DEVICE_ID,
     FirmwareError,
@@ -121,7 +123,13 @@ async def lifespan(_app):
     hub.on_button_pressed = _button_voice_turn
     hub.mark_offline()
     task = asyncio.create_task(heartbeat_loop())
+    # Broadcast discovery, so the terminal can find Jarvis without multicast.
+    discovery = await start_discovery_responder(
+        int(os.environ.get("LOCAL_DEVICE_GATEWAY_PORT", "8767"))
+    )
     yield
+    if discovery is not None:
+        discovery.close()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 
