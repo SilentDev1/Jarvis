@@ -45,6 +45,10 @@ AUDIO_MAX_STREAM_BYTES = (
 # A stream that stalls mid-flight must not leave the amplifier enabled.
 AUDIO_STREAM_TIMEOUT_SECONDS = 10
 
+# Largest binary frame the gateway will accept from the device: one maximum
+# chunk plus its header. Anything larger is refused before it is parsed.
+AUDIO_MAX_BINARY_FRAME_BYTES = 4096 + 8
+
 AUDIO_MAGIC = b"JA"
 AUDIO_HEADER_FORMAT = "<2sHI"
 AUDIO_HEADER_BYTES = struct.calcsize(AUDIO_HEADER_FORMAT)

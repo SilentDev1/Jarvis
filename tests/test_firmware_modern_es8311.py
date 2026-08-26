@@ -36,7 +36,18 @@ def test_codec_register_sequence_is_speaker_only_and_bounded():
     assert "volume <= 60" in codec
     assert 'es8311_codec_write_register(0x13, 0x18)' in codec
     assert 'es8311_codec_write_register(0x04, 0x20)' in codec
-    assert "microphone" not in codec.lower().replace("microphone capture remains disabled", "")
+    # Microphone support is now present, but it must stay strictly additive:
+    # the output initializer must not touch ADC registers, and the input
+    # initializer must not touch the DAC, output routing, or clock dividers
+    # that the physical speaker PASS depends on.
+    output = codec.split("esp_err_t es8311_codec_initialize_output(", 1)[1].split(
+        "esp_err_t es8311_codec_set_volume(", 1)[0]
+    for adc_register in ("0x14", "0x15", "0x17", "0x1B", "0x1C"):
+        assert f"write_register({adc_register}" not in output
+    input_init = codec.split("esp_err_t es8311_codec_initialize_input(", 1)[1].split(
+        "esp_err_t es8311_codec_set_input_muted(", 1)[0]
+    for protected in ("0x13", "0x04", "0x12", "0x32"):
+        assert f"write_register({protected}" not in input_init
 
 
 def test_safe_amplifier_sequence_and_one_shot_tone():

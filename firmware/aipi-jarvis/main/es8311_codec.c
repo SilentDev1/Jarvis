@@ -13,6 +13,7 @@ static const char *TAG = "jarvis_es8311";
 static i2c_master_bus_handle_t codec_bus;
 static i2c_master_dev_handle_t codec_device;
 static bool output_initialized;
+static bool input_initialized;
 
 esp_err_t es8311_codec_bus_initialize(void) {
     if (codec_bus && codec_device) return ESP_OK;
@@ -149,4 +150,45 @@ esp_err_t es8311_codec_shutdown(void) {
     esp_err_t result = es8311_codec_set_muted(true);
     output_initialized = false;
     return result;
+}
+
+/* Microphone input.
+ *
+ * Kept strictly additive to the physically validated speaker configuration:
+ * this writes only ADC registers and never re-touches the DAC, output routing
+ * (0x13), or the clock dividers that the speaker PASS depends on. Register
+ * values follow Espressif's esp_codec_dev ES8311 reference for an analog
+ * single-ended microphone.
+ *
+ * Input is initialized only when capture is actually requested, so a build
+ * that never listens leaves the ADC powered down. */
+esp_err_t es8311_codec_initialize_input(void) {
+    if (input_initialized) return ESP_OK;
+    ESP_RETURN_ON_FALSE(output_initialized, ESP_ERR_INVALID_STATE, TAG,
+                        "codec output must be initialized first");
+    /* 0x1A: ADC digital volume ramp; 0x1B/0x1C: ADC high-pass and equalizer
+     * defaults that remove DC offset from the electret input. */
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x15, 0x40), TAG, "ADC ramp");
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x1B, 0x0A), TAG, "ADC HPF 1");
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x1C, 0x6A), TAG, "ADC HPF 2");
+    /* 0x14: analog microphone, single-ended, with PGA gain. The digital
+     * microphone bit stays clear; this board has an analog electret. */
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x14, 0x1A), TAG, "mic select");
+    /* 0x17: ADC digital volume. Conservative: enough level for speech without
+     * clipping close talkers at the door. */
+    ESP_RETURN_ON_ERROR(es8311_codec_write_register(0x17, 0xBF), TAG, "ADC volume");
+    input_initialized = true;
+    ESP_LOGI(TAG, "ES8311 microphone input PASS rate=16000 PCM16 analog-mic");
+    return ESP_OK;
+}
+
+esp_err_t es8311_codec_set_input_muted(bool muted) {
+    if (!input_initialized) return ESP_ERR_INVALID_STATE;
+    /* 0x17 is the ADC digital volume; zero is a hard digital mute, which is
+     * stronger than relying on the caller to stop reading. */
+    return es8311_codec_write_register(0x17, muted ? 0x00 : 0xBF);
+}
+
+bool es8311_codec_input_ready(void) {
+    return input_initialized;
 }

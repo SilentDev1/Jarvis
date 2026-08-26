@@ -15,6 +15,7 @@ from ..config import get_settings
 from ..core.speech import MacSayTTS
 from ..persistence import Store
 from .audio_stream import (
+    AUDIO_MAX_BINARY_FRAME_BYTES,
     AUDIO_MAX_STREAM_SECONDS,
     AUDIO_SAMPLE_RATE,
     AudioStreamError,
@@ -187,7 +188,17 @@ async def device_gateway(websocket: WebSocket):
                 break
             raw = packet.get("text")
             if raw is None:
-                raise ValueError("binary_messages_disabled")
+                # Binary frames are microphone audio and are accepted only
+                # while a capture the gateway itself requested is open. Outside
+                # that window the device has no reason to send bytes, so they
+                # are refused rather than parsed.
+                payload = packet.get("bytes")
+                if payload is None:
+                    raise ValueError("empty_frame")
+                if len(payload) > AUDIO_MAX_BINARY_FRAME_BYTES:
+                    raise ValueError("binary_frame_too_large")
+                await hub.receive_binary(payload)
+                continue
             if len(raw.encode()) > MAX_CONTROL_BYTES:
                 raise ValueError("message_too_large")
             await hub.receive(parse_message(raw))

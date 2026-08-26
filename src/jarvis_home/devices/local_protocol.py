@@ -14,7 +14,9 @@ from .audio_stream import (
     AudioStreamError,
     OutboundAudioStream,
     chunk_payload,
+    decode_chunk,
     duration_seconds,
+    validate_format,
 )
 from .terminal_state import TerminalState, TerminalStateMachine
 
@@ -110,6 +112,15 @@ class LocalDeviceHub:
         # Consumes the terminal state and the outgoing audio envelope. Disabled
         # until the physical light is identified.
         self.arc = ArcReactorController()
+        # In-flight microphone stream. Bounded: capture is capped by duration
+        # on the device and by byte count here, so a wedged or hostile device
+        # cannot grow host memory.
+        self._mic_stream_id: int | None = None
+        self._mic_sequence = 0
+        self._mic_chunks: list[bytes] = []
+        self._mic_bytes = 0
+        self._mic_done: asyncio.Event | None = None
+        self._mic_reason: str | None = None
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -209,6 +220,69 @@ class LocalDeviceHub:
             "elapsedSeconds": round(time.monotonic() - started, 3),
         }
 
+    def _reset_microphone(self) -> None:
+        self._mic_stream_id = None
+        self._mic_sequence = 0
+        self._mic_chunks = []
+        self._mic_bytes = 0
+
+    async def receive_binary(self, frame: bytes) -> None:
+        """Accept one microphone chunk from the device."""
+        if self._mic_stream_id is None:
+            raise AudioStreamError("unexpected_binary_frame")
+        chunk = decode_chunk(frame)
+        if chunk.stream_id != self._mic_stream_id:
+            raise AudioStreamError("mic_stream_id_mismatch")
+        if chunk.sequence != self._mic_sequence:
+            raise AudioStreamError("mic_sequence_gap")
+        if self._mic_bytes + len(chunk.payload) > AUDIO_MAX_STREAM_BYTES:
+            raise AudioStreamError("mic_stream_too_large")
+        self._mic_sequence += 1
+        self._mic_bytes += len(chunk.payload)
+        self._mic_chunks.append(chunk.payload)
+
+    async def listen(self, max_milliseconds: int = 5000,
+                     stream_id: int = 1) -> bytes:
+        """Capture one bounded utterance and return raw canonical PCM.
+
+        Refuses unless the terminal is in LISTENING, so half-duplex is enforced
+        by state rather than by callers remembering to check.
+        """
+        if self.websocket is None:
+            raise AudioStreamError("device_not_connected")
+        if not self.health.ready:
+            raise AudioStreamError("device_not_ready")
+        if self.terminal.state is not TerminalState.LISTENING:
+            raise AudioStreamError("not_listening")
+        if not self.terminal.microphone_allowed():
+            # The speech tail has not decayed yet; opening now would transcribe
+            # Jarvis's own voice.
+            raise AudioStreamError("microphone_not_settled")
+        if self._mic_stream_id is not None:
+            raise AudioStreamError("mic_stream_already_active")
+
+        self._reset_microphone()
+        self._mic_stream_id = stream_id
+        self._mic_reason = None
+        self._mic_done = asyncio.Event()
+        await self.send("LISTEN_START", streamId=stream_id,
+                        maxMilliseconds=max_milliseconds)
+        try:
+            # Allow the device its full budget plus slack for teardown, then
+            # give up rather than waiting forever on a silent device.
+            await asyncio.wait_for(
+                self._mic_done.wait(), timeout=(max_milliseconds / 1000) + 5
+            )
+        except TimeoutError:
+            self._mic_reason = "host_timeout"
+            with contextlib.suppress(Exception):
+                await self.send("LISTEN_STOP", streamId=stream_id)
+        finally:
+            audio = b"".join(self._mic_chunks)
+            self._reset_microphone()
+            self._mic_done = None
+        return audio
+
     async def send(self, message_type: str, **payload) -> None:
         if self.websocket is None:
             raise ConnectionError("device_offline")
@@ -216,10 +290,30 @@ class LocalDeviceHub:
             json.dumps(message(message_type, **payload), separators=(",", ":"))
         )
 
+    def _handle_microphone_message(self, value: dict) -> bool:
+        kind = value.get("type")
+        if kind == "MIC_BEGIN":
+            # Format is validated even though the device generated it; a device
+            # reporting an unexpected format must not silently corrupt STT.
+            validate_format(
+                int(value.get("sampleRate", 0)),
+                int(value.get("channels", 0)),
+                int(value.get("bitsPerSample", 0)),
+            )
+            return True
+        if kind in ("MIC_END", "MIC_ABORT"):
+            self._mic_reason = str(value.get("reason", kind))
+            if self._mic_done is not None:
+                self._mic_done.set()
+            return True
+        return False
+
     async def receive(self, value: dict) -> None:
         now = time.time()
         self.health.last_seen = now
         message_type = value["type"]
+        if self._handle_microphone_message(value):
+            return
         if message_type == "DEVICE_HELLO":
             if value.get("deviceId") != self.health.device_id:
                 raise ValueError("device_id_mismatch")

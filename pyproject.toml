@@ -7,6 +7,7 @@ dependencies=["fastapi>=0.115,<1","uvicorn[standard]>=0.32,<1","pydantic-setting
 [project.optional-dependencies]
 vision=["opencv-python-headless>=4.10,<5","numpy>=2,<3","ultralytics>=8.3,<9"]
 ocr=["pytesseract>=0.3.13,<1","opencv-python-headless>=4.10,<5"]
+stt=["faster-whisper>=1.0,<2"]
 dev=["pytest>=8,<10","pytest-asyncio>=0.24,<2","ruff>=0.8,<1","mypy>=1.15,<3"]
 [build-system]
 requires=["hatchling"]

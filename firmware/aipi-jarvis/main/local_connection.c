@@ -34,6 +34,10 @@ static esp_websocket_client_handle_t client;
 static bool online;
 static uint16_t active_stream_id;
 static uint32_t expected_sequence;
+static TaskHandle_t capture_task_handle;
+static volatile bool capture_stop_requested;
+static uint16_t capture_stream_id;
+static uint32_t capture_max_ms;
 static TaskHandle_t reconnect_task_handle;
 
 static void reconnect_task(void *arg) {
@@ -175,6 +179,87 @@ static void process_audio_frame(esp_websocket_event_data_t *event,
     }
 }
 
+/* Streams bounded microphone audio to Jarvis.
+ *
+ * Runs as its own task because i2s_channel_read blocks; doing this in the
+ * websocket event handler would stall the connection. Capture is bounded by
+ * capture_max_ms and by an explicit stop, and the microphone is always torn
+ * down on the way out, including on send failure, so the ADC is never left
+ * live because a message was missed. Nothing is buffered beyond one chunk. */
+static void capture_task(void *unused) {
+    (void)unused;
+    uint8_t chunk[AUDIO_MIC_CHUNK_BYTES];
+    uint8_t frame[AUDIO_FRAME_HEADER_BYTES + AUDIO_MIC_CHUNK_BYTES];
+    uint32_t sequence = 0;
+    uint32_t sent_bytes = 0;
+    const uint32_t max_bytes =
+        (AUDIO_SAMPLE_RATE_HZ * (AUDIO_BITS_PER_SAMPLE / 8)) / 1000 * capture_max_ms;
+    TickType_t started = xTaskGetTickCount();
+    const char *reason = "complete";
+
+    esp_err_t result = audio_input_begin();
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "microphone start failed: %s", esp_err_to_name(result));
+        cJSON *failed = base_message("MIC_ABORT");
+        cJSON_AddNumberToObject(failed, "streamId", capture_stream_id);
+        cJSON_AddStringToObject(failed, "reason", esp_err_to_name(result));
+        send_json(failed);
+        capture_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    cJSON *begin = base_message("MIC_BEGIN");
+    cJSON_AddNumberToObject(begin, "streamId", capture_stream_id);
+    cJSON_AddNumberToObject(begin, "sampleRate", AUDIO_SAMPLE_RATE_HZ);
+    cJSON_AddNumberToObject(begin, "channels", AUDIO_CHANNELS);
+    cJSON_AddNumberToObject(begin, "bitsPerSample", AUDIO_BITS_PER_SAMPLE);
+    send_json(begin);
+
+    while (!capture_stop_requested && sent_bytes < max_bytes) {
+        if ((xTaskGetTickCount() - started) > pdMS_TO_TICKS(capture_max_ms)) {
+            reason = "duration_limit";
+            break;
+        }
+        size_t got = 0;
+        if (audio_input_read(chunk, sizeof(chunk), &got, 500) != ESP_OK || got == 0) {
+            reason = "read_failed";
+            break;
+        }
+        frame[0] = AUDIO_FRAME_MAGIC_0;
+        frame[1] = AUDIO_FRAME_MAGIC_1;
+        frame[2] = (uint8_t)(capture_stream_id & 0xFF);
+        frame[3] = (uint8_t)(capture_stream_id >> 8);
+        frame[4] = (uint8_t)(sequence & 0xFF);
+        frame[5] = (uint8_t)((sequence >> 8) & 0xFF);
+        frame[6] = (uint8_t)((sequence >> 16) & 0xFF);
+        frame[7] = (uint8_t)((sequence >> 24) & 0xFF);
+        memcpy(frame + AUDIO_FRAME_HEADER_BYTES, chunk, got);
+        int written = esp_websocket_client_send_bin(
+            client, (const char *)frame, (int)(AUDIO_FRAME_HEADER_BYTES + got),
+            pdMS_TO_TICKS(1000));
+        if (written < 0) {
+            reason = "send_failed";
+            break;
+        }
+        sequence++;
+        sent_bytes += got;
+    }
+    if (capture_stop_requested) reason = "stopped";
+
+    audio_input_end();
+    cJSON *end = base_message("MIC_END");
+    cJSON_AddNumberToObject(end, "streamId", capture_stream_id);
+    cJSON_AddNumberToObject(end, "totalChunks", sequence);
+    cJSON_AddNumberToObject(end, "totalBytes", sent_bytes);
+    cJSON_AddStringToObject(end, "reason", reason);
+    send_json(end);
+    ESP_LOGI(TAG, "microphone stream END bytes=%lu reason=%s",
+             (unsigned long)sent_bytes, reason);
+    capture_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
 static void process_control(const char *data, int length) {
     cJSON *root = cJSON_ParseWithLength(data, length);
     if (!root) return;
@@ -233,6 +318,34 @@ static void process_control(const char *data, int length) {
     } else if (!strcmp(type->valuestring, "AUDIO_ABORT")) {
         active_stream_id = 0;
         audio_playback_abort("gateway_abort");
+    } else if (!strcmp(type->valuestring, "LISTEN_START")) {
+        cJSON *stream = cJSON_GetObjectItemCaseSensitive(root, "streamId");
+        cJSON *max_ms = cJSON_GetObjectItemCaseSensitive(root, "maxMilliseconds");
+        if (!online) {
+            ESP_LOGW(TAG, "LISTEN_START rejected: session not ready");
+        } else if (audio_playback_active()) {
+            /* Half-duplex: never open the microphone while the amplifier is
+             * driving the speaker, whatever the host believes. */
+            ESP_LOGW(TAG, "LISTEN_START rejected: speaker active");
+        } else if (capture_task_handle) {
+            ESP_LOGW(TAG, "LISTEN_START rejected: already capturing");
+        } else if (!cJSON_IsNumber(stream) || stream->valueint <= 0 ||
+                   stream->valueint > 0xFFFF) {
+            ESP_LOGW(TAG, "LISTEN_START rejected: malformed");
+        } else {
+            capture_stream_id = (uint16_t)stream->valueint;
+            capture_max_ms = cJSON_IsNumber(max_ms)
+                ? (uint32_t)max_ms->valuedouble : AUDIO_MIC_DEFAULT_MS;
+            if (capture_max_ms > AUDIO_MIC_MAX_MS) capture_max_ms = AUDIO_MIC_MAX_MS;
+            capture_stop_requested = false;
+            if (xTaskCreate(capture_task, "aipi_capture", 4096, NULL, 5,
+                            &capture_task_handle) != pdPASS) {
+                capture_task_handle = NULL;
+                ESP_LOGE(TAG, "LISTEN_START failed: no memory for capture task");
+            }
+        }
+    } else if (!strcmp(type->valuestring, "LISTEN_STOP")) {
+        capture_stop_requested = true;
     }
     cJSON_Delete(root);
 }
@@ -261,6 +374,9 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
         /* A dropped connection mid-utterance must never leave the amplifier
          * enabled waiting for chunks that will never arrive. */
         audio_playback_abort("connection_lost");
+        /* Close the microphone too. A dead socket must not leave the ADC live
+         * streaming into a connection that no longer exists. */
+        capture_stop_requested = true;
         active_stream_id = 0;
         audio_frame_filled = 0;
         online = false;

@@ -100,12 +100,46 @@ def test_receive_buffer_holds_a_whole_maximum_audio_frame():
     assert ".buffer_size = WS_RX_BUFFER_BYTES," in connection
 
 
-def test_microphone_input_is_still_disabled():
-    combined = read("audio_output.c") + read("local_connection.c") + read("es8311_codec.c")
-    assert "i2s_channel_read" not in combined
-    assert "MIC_BEGIN" not in combined
-    # DIN stays unused; enabling capture is a separately gated phase.
-    assert "AIPI_AUDIO_DIN" not in read("audio_output.c")
+def test_microphone_capture_cannot_run_while_the_speaker_does():
+    audio = read("audio_output.c")
+    begin = audio.split("esp_err_t audio_input_begin(", 1)[1].split(
+        "esp_err_t audio_input_read(", 1)[0]
+    # Capture takes the same lock playback holds, so the microphone can never
+    # be open while the amplifier drives the speaker. This is the hardware half
+    # of half-duplex; the terminal state machine is the host half.
+    assert "xSemaphoreTake(playback_lock, 0)" in begin
+    assert "speaker busy" in begin
+    connection = read("local_connection.c")
+    listen = connection.split('"LISTEN_START"', 1)[1].split('"LISTEN_STOP"', 1)[0]
+    assert "audio_playback_active()" in listen
+    assert "speaker active" in listen
+
+
+def test_microphone_capture_is_bounded_and_never_stored():
+    audio = read("audio_output.c")
+    header = read("audio_output.h")
+    assert "AUDIO_MIC_MAX_MS" in header
+    connection = read("local_connection.c")
+    capture = connection.split("static void capture_task(", 1)[1].split(
+        "static void process_control(", 1)[0]
+    # Bounded by both an explicit stop and a duration cap, so a wedged session
+    # cannot stream indefinitely.
+    assert "capture_stop_requested" in capture
+    assert "duration_limit" in capture
+    assert "AUDIO_MIC_MAX_MS" in connection
+    # Audio is never written to flash or accumulated on the device.
+    for forbidden in ("fopen", "nvs_set", "malloc", "heap_caps_malloc"):
+        assert forbidden not in capture
+    # The microphone is torn down on every exit path, not only success.
+    assert capture.count("audio_input_end()") >= 1
+    assert "audio_input_end" in audio
+
+
+def test_connection_loss_closes_the_microphone():
+    connection = read("local_connection.c")
+    # A dead socket must not leave the ADC live.
+    disconnect = connection.split('audio_playback_abort("connection_lost")', 1)[1]
+    assert "capture_stop_requested = true" in disconnect[:400]
 
 
 def test_gpio10_is_still_never_configured():

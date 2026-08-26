@@ -16,6 +16,12 @@
 #define AUDIO_MAX_STREAM_BYTES \
     (AUDIO_SAMPLE_RATE_HZ * AUDIO_CHANNELS * (AUDIO_BITS_PER_SAMPLE / 8) * \
      AUDIO_MAX_STREAM_SECONDS)
+/* Microphone capture bounds. A door-terminal utterance is short, so capping
+ * the duration stops a wedged session from streaming audio indefinitely. */
+#define AUDIO_MIC_CHUNK_BYTES 1024
+#define AUDIO_MIC_DEFAULT_MS 5000
+#define AUDIO_MIC_MAX_MS 15000
+
 /* A stalled stream must never hold the amplifier open. */
 #define AUDIO_STREAM_TIMEOUT_MS 10000
 
@@ -39,3 +45,13 @@ bool audio_playback_active(void);
 /* Aborts a stream that has stalled mid-flight, so a wedged sender cannot leave
  * the amplifier enabled. Safe to call when no stream is active. */
 void audio_playback_poll_timeout(void);
+
+/* Bounded microphone capture.
+ *
+ * Capture and playback share one lock, so the microphone can never be open
+ * while the amplifier drives the speaker. Nothing is stored on the device. */
+bool audio_input_active(void);
+esp_err_t audio_input_begin(void);
+esp_err_t audio_input_read(uint8_t *buffer, size_t bytes, size_t *out_bytes,
+                           uint32_t timeout_ms);
+void audio_input_end(void);

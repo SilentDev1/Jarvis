@@ -21,6 +21,8 @@
 
 static const char *TAG = "jarvis_audio";
 static i2s_chan_handle_t tx_channel;
+static i2s_chan_handle_t rx_channel;
+static bool capturing;
 static SemaphoreHandle_t playback_lock;
 static bool initialized;
 static bool playing;
@@ -57,7 +59,10 @@ static esp_err_t initialize(void) {
     i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(
         I2S_NUM_0, I2S_ROLE_MASTER);
     channel_config.auto_clear = true;
-    esp_err_t result = i2s_new_channel(&channel_config, &tx_channel, NULL);
+    /* Allocate RX alongside TX. The known-working AiPi Lite reference does the
+     * same, and allocating both once at startup avoids touching GDMA later
+     * while audio is live. RX stays disabled until capture is requested. */
+    esp_err_t result = i2s_new_channel(&channel_config, &tx_channel, &rx_channel);
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "I2S channel init failed: %s", esp_err_to_name(result));
         return result;
@@ -71,11 +76,13 @@ static esp_err_t initialize(void) {
             .bclk = AIPI_AUDIO_BCLK,
             .ws = AIPI_AUDIO_WS,
             .dout = AIPI_AUDIO_DOUT,
-            .din = I2S_GPIO_UNUSED,
+            .din = AIPI_AUDIO_DIN,
         },
     };
     standard_config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
     result = i2s_channel_init_std_mode(tx_channel, &standard_config);
+    if (result != ESP_OK) return result;
+    result = i2s_channel_init_std_mode(rx_channel, &standard_config);
     if (result != ESP_OK) return result;
     result = i2s_channel_enable(tx_channel);
     if (result != ESP_OK) return result;
@@ -297,4 +304,71 @@ void audio_playback_poll_timeout(void) {
     if (elapsed > pdMS_TO_TICKS(AUDIO_STREAM_TIMEOUT_MS)) {
         audio_playback_abort("stream_timeout");
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Bounded microphone capture
+ *
+ * Capture is half-duplex by construction: it takes the same lock playback
+ * uses, so the microphone can never be open while the amplifier drives the
+ * speaker. Nothing is stored on the device; samples go straight to the caller.
+ * ------------------------------------------------------------------------- */
+
+bool audio_input_active(void) {
+    return capturing;
+}
+
+esp_err_t audio_input_begin(void) {
+    ESP_RETURN_ON_ERROR(initialize(), TAG, "capture initialize");
+    if (capturing) return ESP_ERR_INVALID_STATE;
+    /* Refuse if playback owns the path. This is the hardware-level half of the
+     * half-duplex rule the terminal state machine enforces on the host. */
+    ESP_RETURN_ON_FALSE(xSemaphoreTake(playback_lock, 0) == pdTRUE,
+                        ESP_ERR_INVALID_STATE, TAG, "speaker busy");
+    esp_err_t result = es8311_codec_initialize_input();
+    if (result != ESP_OK) goto fail;
+    result = i2s_channel_enable(rx_channel);
+    if (result != ESP_OK) goto fail;
+    result = es8311_codec_set_input_muted(false);
+    if (result != ESP_OK) {
+        i2s_channel_disable(rx_channel);
+        goto fail;
+    }
+    capturing = true;
+    ESP_LOGI(TAG, "microphone capture START rate=%d PCM16", SAMPLE_RATE);
+    return ESP_OK;
+fail:
+    xSemaphoreGive(playback_lock);
+    return result;
+}
+
+esp_err_t audio_input_read(uint8_t *buffer, size_t bytes, size_t *out_bytes,
+                           uint32_t timeout_ms) {
+    ESP_RETURN_ON_FALSE(capturing && buffer && out_bytes && bytes,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid capture read");
+    /* The codec runs stereo slots, so captured frames are stereo pairs of a
+     * mono source. Read into a bounded stack buffer and keep the left channel,
+     * producing the canonical mono stream without allocating. */
+    int16_t stereo[CHUNK_SAMPLES * 2];
+    size_t mono_wanted = bytes / sizeof(int16_t);
+    if (mono_wanted > CHUNK_SAMPLES) mono_wanted = CHUNK_SAMPLES;
+    size_t read_bytes = 0;
+    esp_err_t result = i2s_channel_read(rx_channel, stereo,
+                                        mono_wanted * 2 * sizeof(int16_t),
+                                        &read_bytes, pdMS_TO_TICKS(timeout_ms));
+    if (result != ESP_OK) return result;
+    size_t frames = read_bytes / (2 * sizeof(int16_t));
+    int16_t *mono = (int16_t *)buffer;
+    for (size_t i = 0; i < frames; ++i) mono[i] = stereo[i * 2];
+    *out_bytes = frames * sizeof(int16_t);
+    return ESP_OK;
+}
+
+void audio_input_end(void) {
+    if (!capturing) return;
+    es8311_codec_set_input_muted(true);
+    i2s_channel_disable(rx_channel);
+    capturing = false;
+    xSemaphoreGive(playback_lock);
+    ESP_LOGI(TAG, "microphone capture END");
 }

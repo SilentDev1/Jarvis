@@ -13,3 +13,9 @@ esp_err_t es8311_codec_read_register(uint8_t reg, uint8_t *value);
 esp_err_t es8311_codec_set_volume(unsigned volume);
 esp_err_t es8311_codec_set_muted(bool muted);
 esp_err_t es8311_codec_shutdown(void);
+
+/* Microphone input. Additive to the validated speaker configuration: only ADC
+ * registers are written, never the DAC, output routing, or clock dividers. */
+esp_err_t es8311_codec_initialize_input(void);
+esp_err_t es8311_codec_set_input_muted(bool muted);
+bool es8311_codec_input_ready(void);

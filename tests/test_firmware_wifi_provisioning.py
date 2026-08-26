@@ -38,15 +38,18 @@ def test_local_gateway_configuration_is_runtime_only_and_redacted():
     assert all("token" not in line.lower() for line in connection.splitlines() if "ESP_LOG" in line)
 
 
-def test_local_firmware_protocol_has_no_audio_messages():
+def test_local_firmware_protocol_messages_are_gated():
     connection = (FIRMWARE / "main" / "local_connection.c").read_text()
     for message_type in (
         "DEVICE_HELLO", "PONG", "DEVICE_STATUS", "DEVICE_READY",
         "PING", "STATUS_REQUEST",
     ):
         assert message_type in connection
-    for forbidden in ("PLAY_AUDIO", "AUDIO_START", "START_LISTENING", "microphone"):
-        assert forbidden not in connection
+    # Audio and microphone messages exist now. Every one that actuates hardware
+    # must be refused unless the authenticated session is ready.
+    for gated in ("AUDIO_BEGIN", "LISTEN_START"):
+        window = connection.split(f'"{gated}"', 1)[1].split("else if", 1)[0]
+        assert "if (!online)" in window, f"{gated} is not gated on a ready session"
 
 
 def test_custom_nvs_does_not_overlap_factory_nvs():
