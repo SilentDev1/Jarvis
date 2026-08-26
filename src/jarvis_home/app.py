@@ -721,6 +721,25 @@ async def voice_session_watchdog():
         await asyncio.sleep(1)
 
 
+async def terminal_health_loop():
+    """Keep the voice terminal's cached availability fresh.
+
+    is_available() is synchronous by contract, so it reads a cache. Without a
+    refresher that cache stays "unknown" and every camera-triggered greeting
+    fails closed as terminal_unavailable, which looks exactly like a broken
+    device.
+    """
+    refresh = getattr(voice, "refresh_health", None)
+    if refresh is None:
+        return
+    while True:
+        try:
+            await refresh()
+        except Exception:
+            logger.exception("Voice terminal health refresh failed")
+        await asyncio.sleep(10)
+
+
 @asynccontextmanager
 async def lifespan(app):
     setup_logging()
@@ -729,12 +748,14 @@ async def lifespan(app):
     vision_task = asyncio.create_task(live_vision_loop())
     cleanup_task = asyncio.create_task(media_cleanup_loop())
     voice_task = asyncio.create_task(voice_session_watchdog())
+    terminal_task = asyncio.create_task(terminal_health_loop())
     yield
     vision_task.cancel()
     cleanup_task.cancel()
     voice_task.cancel()
+    terminal_task.cancel()
     await asyncio.gather(
-        vision_task, cleanup_task, voice_task, return_exceptions=True
+        vision_task, cleanup_task, voice_task, terminal_task, return_exceptions=True
     )
     bus.publish("system.stopped")
 

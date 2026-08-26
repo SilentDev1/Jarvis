@@ -122,3 +122,23 @@ def test_health_is_synchronous_matching_the_provider_contract():
 
     assert not inspect.iscoroutinefunction(AiPiGatewayVoice.health)
     assert not inspect.iscoroutinefunction(VoiceTerminalProvider.health)
+
+
+@pytest.mark.asyncio
+async def test_availability_is_false_until_health_is_refreshed():
+    # is_available() is synchronous by contract and reads a cache. Without a
+    # refresher the cache stays unknown and every camera-triggered greeting
+    # fails closed as terminal_unavailable, which looks like a broken device.
+    p = provider()
+    assert p.health()["status"] == "unknown"
+    assert p.is_available() is False
+
+
+def test_app_refreshes_terminal_health_periodically():
+    from pathlib import Path
+
+    source = Path("src/jarvis_home/app.py").read_text()
+    assert "terminal_health_loop" in source
+    assert "refresh_health" in source
+    # It must actually be scheduled, not merely defined.
+    assert "asyncio.create_task(terminal_health_loop())" in source
