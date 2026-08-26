@@ -25,7 +25,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "1.2.0-arc-light"
+#define FIRMWARE_VERSION "1.2.1-arc-light"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -524,6 +524,9 @@ static void process_control(const char *data, int length) {
         if (cJSON_IsBool(on)) arc_light_set_enabled(cJSON_IsTrue(on));
         ESP_LOGI(TAG, "arc light settings applied (enabled=%s)",
                  arc_light_enabled() ? "yes" : "no");
+        /* Report immediately: DEVICE_STATUS is otherwise only sent on connect,
+         * so the owner's view would show the light off while it is lit. */
+        send_status();
     } else if (!strcmp(type->valuestring, "LISTEN_STOP")) {
         capture_stop_requested = true;
     } else if (!strcmp(type->valuestring, "OTA_OFFER")) {

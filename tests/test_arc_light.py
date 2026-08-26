@@ -140,3 +140,11 @@ def test_light_failure_never_stops_the_device():
     app = read("app_main.c")
     start = app.split("arc_light_init(", 1)[1][:120]
     assert "ESP_ERROR_CHECK" not in start
+
+
+def test_settings_change_reports_status_immediately():
+    # DEVICE_STATUS is otherwise only sent on connect, so the owner's view
+    # would show the light off while it is actually lit.
+    connection = read("local_connection.c")
+    window = connection.split('"ARC_SETTINGS"', 1)[1].split("else if", 1)[0]
+    assert "send_status()" in window
