@@ -1,6 +1,6 @@
 # Jarvis AiPi firmware
 
-Version `0.2.3-speaker-clock` extends the controlled hardware-validation
+Version `0.3.0-audio-stream` extends the controlled hardware-validation
 image. It initializes serial logging and octal PSRAM, renders a simple ST7735
 status screen, debounces the active-low GPIO42 side button, and probes the
 ES8311 on GPIO4/GPIO5. The speaker amplifier is held off except during one
@@ -25,7 +25,13 @@ samples, on MCLK GPIO6, BCLK GPIO14, WS GPIO12, and DOUT GPIO11. I2S and GDMA
 are initialized once during startup with the amplifier disabled, never inside
 the button task.
 
-The only audio path in this image is a bounded diagnostic tone: 880 Hz, 400 ms,
+Streamed playback is physically verified. Jarvis sends AUDIO_BEGIN, binary
+chunk frames, and AUDIO_END over the authenticated connection; the device plays
+them through the same validated signal path as the diagnostic tone. The
+amplifier is dropped on normal end, on abort, on any rejected chunk, on stall
+timeout, and on disconnect or reconnect. Microphone capture remains disabled.
+
+The local diagnostic tone remains available: 880 Hz, 400 ms,
 PCM amplitude 16,000, codec volume capped at 60%. It is armed solely by the
 authenticated local connection reaching ONLINE and is triggered solely by an
 explicit right-side GPIO42 press. There is no boot-time autoplay and no

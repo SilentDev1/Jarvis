@@ -18,12 +18,22 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.2.3-speaker-clock"
+#define FIRMWARE_VERSION "0.3.0-audio-stream"
 #define MAX_RX_BYTES 4096
+/* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
+ * websocket receive buffer must hold a whole maximum-size frame, otherwise the
+ * client fragments it and the chunk cannot be validated as a unit. */
+#define AUDIO_FRAME_HEADER_BYTES 8
+#define MAX_AUDIO_FRAME_BYTES (AUDIO_FRAME_HEADER_BYTES + AUDIO_MAX_CHUNK_BYTES)
+#define WS_RX_BUFFER_BYTES 8192
+#define AUDIO_FRAME_MAGIC_0 'J'
+#define AUDIO_FRAME_MAGIC_1 'A'
 
 static const char *TAG = "jarvis_local";
 static esp_websocket_client_handle_t client;
 static bool online;
+static uint16_t active_stream_id;
+static uint32_t expected_sequence;
 static TaskHandle_t reconnect_task_handle;
 
 static void reconnect_task(void *arg) {
@@ -94,6 +104,46 @@ static void send_status(void) {
     send_json(root);
 }
 
+/* Validates and plays one binary audio frame.
+ *
+ * Every rejection aborts the stream rather than skipping the chunk: silently
+ * dropping a chunk would emit a glitch and desynchronise the sequence, and a
+ * stream that is already malformed has no claim on the amplifier. */
+static void process_audio_frame(esp_websocket_event_data_t *event,
+                                const uint8_t *frame) {
+    if (!audio_playback_active() || active_stream_id == 0) return;
+    if (event->payload_offset != 0 || event->data_len != event->payload_len ||
+        event->payload_len < AUDIO_FRAME_HEADER_BYTES + 2 ||
+        event->payload_len > MAX_AUDIO_FRAME_BYTES) {
+        audio_playback_abort("frame_bounds");
+        active_stream_id = 0;
+        return;
+    }
+    if (frame[0] != AUDIO_FRAME_MAGIC_0 || frame[1] != AUDIO_FRAME_MAGIC_1) {
+        audio_playback_abort("bad_magic");
+        active_stream_id = 0;
+        return;
+    }
+    uint16_t stream_id = (uint16_t)(frame[2] | (frame[3] << 8));
+    uint32_t sequence = (uint32_t)frame[4] | ((uint32_t)frame[5] << 8) |
+                        ((uint32_t)frame[6] << 16) | ((uint32_t)frame[7] << 24);
+    if (stream_id != active_stream_id) {
+        audio_playback_abort("stream_id_mismatch");
+        active_stream_id = 0;
+        return;
+    }
+    if (sequence != expected_sequence) {
+        audio_playback_abort("sequence_gap");
+        active_stream_id = 0;
+        return;
+    }
+    expected_sequence++;
+    if (audio_playback_write(frame + AUDIO_FRAME_HEADER_BYTES,
+                             event->data_len - AUDIO_FRAME_HEADER_BYTES) != ESP_OK) {
+        active_stream_id = 0;
+    }
+}
+
 static void process_control(const char *data, int length) {
     cJSON *root = cJSON_ParseWithLength(data, length);
     if (!root) return;
@@ -117,6 +167,40 @@ static void process_control(const char *data, int length) {
         send_json(reply);
     } else if (!strcmp(type->valuestring, "STATUS_REQUEST")) {
         send_status();
+    } else if (!strcmp(type->valuestring, "AUDIO_BEGIN")) {
+        /* Playback is only ever accepted on an authenticated session that has
+         * completed the DEVICE_READY handshake. */
+        if (!online) {
+            ESP_LOGW(TAG, "AUDIO_BEGIN rejected: session not ready");
+        } else {
+            cJSON *rate = cJSON_GetObjectItemCaseSensitive(root, "sampleRate");
+            cJSON *channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
+            cJSON *bits = cJSON_GetObjectItemCaseSensitive(root, "bitsPerSample");
+            cJSON *expected = cJSON_GetObjectItemCaseSensitive(root, "expectedBytes");
+            cJSON *stream = cJSON_GetObjectItemCaseSensitive(root, "streamId");
+            if (!cJSON_IsNumber(rate) || !cJSON_IsNumber(channels) ||
+                !cJSON_IsNumber(bits) || !cJSON_IsNumber(stream) ||
+                stream->valueint <= 0 || stream->valueint > 0xFFFF) {
+                ESP_LOGW(TAG, "AUDIO_BEGIN rejected: malformed");
+            } else {
+                active_stream_id = stream->valueint;
+                expected_sequence = 0;
+                esp_err_t result = audio_playback_begin(
+                    (uint32_t)rate->valueint, (uint8_t)channels->valueint,
+                    (uint8_t)bits->valueint,
+                    cJSON_IsNumber(expected) ? (uint32_t)expected->valuedouble : 0);
+                if (result != ESP_OK) {
+                    active_stream_id = 0;
+                    ESP_LOGW(TAG, "AUDIO_BEGIN rejected: %s", esp_err_to_name(result));
+                }
+            }
+        }
+    } else if (!strcmp(type->valuestring, "AUDIO_END")) {
+        active_stream_id = 0;
+        audio_playback_end();
+    } else if (!strcmp(type->valuestring, "AUDIO_ABORT")) {
+        active_stream_id = 0;
+        audio_playback_abort("gateway_abort");
     }
     cJSON_Delete(root);
 }
@@ -127,6 +211,8 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
     esp_websocket_event_data_t *event = data;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         online = false;
+        audio_playback_abort("reconnected");
+        active_stream_id = 0;
         audio_output_set_manual_test_enabled(false);
         bringup_display_status("JARVIS", "WI-FI: OK", "AUTHENTICATING");
         send_hello();
@@ -134,9 +220,15 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
                event->payload_len <= MAX_RX_BYTES && event->payload_offset == 0 &&
                event->data_len == event->payload_len) {
         process_control(event->data_ptr, event->data_len);
+    } else if (event_id == WEBSOCKET_EVENT_DATA && event->op_code == 2) {
+        process_audio_frame(event, (const uint8_t *)event->data_ptr);
     } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED || event_id == WEBSOCKET_EVENT_CLOSED ||
                event_id == WEBSOCKET_EVENT_ERROR) {
         if (online) ESP_LOGW(TAG, "local Jarvis connection OFFLINE; reconnecting");
+        /* A dropped connection mid-utterance must never leave the amplifier
+         * enabled waiting for chunks that will never arrive. */
+        audio_playback_abort("connection_lost");
+        active_stream_id = 0;
         online = false;
         bringup_display_status("JARVIS", "WI-FI: OK", "JARVIS: OFFLINE");
         if (reconnect_task_handle) xTaskNotifyGive(reconnect_task_handle);
@@ -158,7 +250,7 @@ esp_err_t local_connection_start(void) {
         .disable_auto_reconnect = true,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 5000,
-        .buffer_size = MAX_RX_BYTES,
+        .buffer_size = WS_RX_BUFFER_BYTES,
         .ping_interval_sec = 30,
         .pingpong_timeout_sec = 75,
         .keep_alive_enable = true,

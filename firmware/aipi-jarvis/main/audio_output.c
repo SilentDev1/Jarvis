@@ -25,6 +25,10 @@ static SemaphoreHandle_t playback_lock;
 static bool initialized;
 static bool playing;
 static volatile bool manual_test_enabled;
+static bool streaming;
+static uint32_t stream_expected_bytes;
+static uint32_t stream_written_bytes;
+static TickType_t stream_last_write_tick;
 
 void audio_output_set_manual_test_enabled(bool enabled) {
     manual_test_enabled = enabled;
@@ -161,4 +165,136 @@ esp_err_t audio_output_test_tone(void) {
     stop();
     ESP_LOGI(TAG, "one-shot speaker tone END result=%s", esp_err_to_name(result));
     return result;
+}
+
+/* ---------------------------------------------------------------------------
+ * Bounded streaming playback
+ *
+ * write_mono() above is reused unchanged so that streamed audio travels the
+ * exact signal path that was physically validated by the test tone.
+ * ------------------------------------------------------------------------- */
+
+bool audio_playback_active(void) {
+    return streaming;
+}
+
+static void stream_reset(void) {
+    streaming = false;
+    stream_expected_bytes = 0;
+    stream_written_bytes = 0;
+}
+
+esp_err_t audio_playback_begin(uint32_t sample_rate, uint8_t channels,
+                               uint8_t bits_per_sample, uint32_t expected_bytes) {
+    /* Only the canonical format is accepted. Silently resampling or accepting a
+     * format the codec is not configured for would produce noise at full
+     * amplifier gain. */
+    if (sample_rate != AUDIO_SAMPLE_RATE_HZ || channels != AUDIO_CHANNELS ||
+        bits_per_sample != AUDIO_BITS_PER_SAMPLE) {
+        ESP_LOGW(TAG, "playback rejected: unsupported format %lu/%u/%u",
+                 (unsigned long)sample_rate, channels, bits_per_sample);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (expected_bytes > AUDIO_MAX_STREAM_BYTES) {
+        ESP_LOGW(TAG, "playback rejected: stream too large (%lu bytes)",
+                 (unsigned long)expected_bytes);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (streaming) {
+        ESP_LOGW(TAG, "playback rejected: a stream is already active");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_ERROR(start(), TAG, "playback start");
+    streaming = true;
+    stream_expected_bytes = expected_bytes;
+    stream_written_bytes = 0;
+    stream_last_write_tick = xTaskGetTickCount();
+    ESP_LOGI(TAG, "playback START rate=%lu expected=%lu bytes",
+             (unsigned long)sample_rate, (unsigned long)expected_bytes);
+    return ESP_OK;
+}
+
+esp_err_t audio_playback_write(const uint8_t *pcm, size_t bytes) {
+    if (!streaming) return ESP_ERR_INVALID_STATE;
+    if (!pcm || bytes == 0) {
+        audio_playback_abort("empty_chunk");
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* A partial sample would desynchronise every following frame. */
+    if (bytes % sizeof(int16_t)) {
+        audio_playback_abort("chunk_not_sample_aligned");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (bytes > AUDIO_MAX_CHUNK_BYTES) {
+        audio_playback_abort("chunk_too_large");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (stream_written_bytes + bytes > AUDIO_MAX_STREAM_BYTES) {
+        audio_playback_abort("stream_too_large");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (stream_expected_bytes &&
+        stream_written_bytes + bytes > stream_expected_bytes) {
+        audio_playback_abort("stream_overrun");
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* Feed the validated writer in its fixed chunk size rather than allocating
+     * a buffer proportional to the response. Memory stays bounded regardless of
+     * how long Jarvis speaks. */
+    const int16_t *samples = (const int16_t *)pcm;
+    size_t remaining = bytes / sizeof(int16_t);
+    while (remaining) {
+        size_t count = remaining > CHUNK_SAMPLES ? CHUNK_SAMPLES : remaining;
+        esp_err_t result = write_mono(samples, count);
+        if (result != ESP_OK) {
+            audio_playback_abort("i2s_write_failed");
+            return result;
+        }
+        samples += count;
+        remaining -= count;
+    }
+    stream_written_bytes += bytes;
+    stream_last_write_tick = xTaskGetTickCount();
+    return ESP_OK;
+}
+
+esp_err_t audio_playback_end(void) {
+    if (!streaming) return ESP_ERR_INVALID_STATE;
+    esp_err_t result = ESP_OK;
+    if (stream_expected_bytes && stream_written_bytes != stream_expected_bytes) {
+        ESP_LOGW(TAG, "playback underrun: %lu of %lu bytes",
+                 (unsigned long)stream_written_bytes,
+                 (unsigned long)stream_expected_bytes);
+        result = ESP_ERR_INVALID_SIZE;
+    }
+    /* Flush a chunk of silence so the tail of the utterance is clocked out
+     * before the amplifier is cut, otherwise the last word is truncated. */
+    int16_t silence[CHUNK_SAMPLES] = {0};
+    write_mono(silence, CHUNK_SAMPLES);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    ESP_LOGI(TAG, "playback END bytes=%lu result=%s",
+             (unsigned long)stream_written_bytes, esp_err_to_name(result));
+    stream_reset();
+    stop();
+    return result;
+}
+
+void audio_playback_abort(const char *reason) {
+    if (!streaming) return;
+    ESP_LOGW(TAG, "playback ABORT reason=%s bytes=%lu",
+             reason ? reason : "unspecified",
+             (unsigned long)stream_written_bytes);
+    stream_reset();
+    /* stop() mutes the codec, drops GPIO9, disables the channel and releases
+     * the lock, so the amplifier is off on every abort path. */
+    stop();
+}
+
+void audio_playback_poll_timeout(void) {
+    if (!streaming) return;
+    TickType_t elapsed = xTaskGetTickCount() - stream_last_write_tick;
+    if (elapsed > pdMS_TO_TICKS(AUDIO_STREAM_TIMEOUT_MS)) {
+        audio_playback_abort("stream_timeout");
+    }
 }

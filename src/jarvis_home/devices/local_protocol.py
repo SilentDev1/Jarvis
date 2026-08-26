@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import secrets
 import time
@@ -6,6 +7,14 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
 from ..persistence import Device, utcnow
+from .audio_stream import (
+    AUDIO_MAX_STREAM_BYTES,
+    AUDIO_SAMPLE_BYTES,
+    AudioStreamError,
+    OutboundAudioStream,
+    chunk_payload,
+    duration_seconds,
+)
 
 PROTOCOL_VERSION = 1
 SUBPROTOCOL = "jarvis.device.v1"
@@ -90,6 +99,9 @@ class LocalDeviceHub:
         self.websocket = None
         self.health = LocalDeviceHealth()
         self._lock = asyncio.Lock()
+        # Only one utterance may be in flight; a second would interleave on the
+        # device and leave amplifier ownership ambiguous.
+        self._audio_active = False
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -131,6 +143,50 @@ class LocalDeviceHub:
             self.health.terminal_state = "JARVIS_OFFLINE"
             self.health.last_error = reason
             self._persist(False)
+
+    async def play_pcm(self, pcm: bytes, stream_id: int = 1) -> dict:
+        """Stream one bounded PCM utterance to the device.
+
+        Returns playback statistics. Any failure aborts the stream so the
+        device drops the amplifier rather than waiting for chunks that will
+        never arrive.
+        """
+        if self.websocket is None:
+            raise AudioStreamError("device_not_connected")
+        if not self.health.ready:
+            raise AudioStreamError("device_not_ready")
+        if not pcm:
+            raise AudioStreamError("empty_stream")
+        if len(pcm) % AUDIO_SAMPLE_BYTES:
+            raise AudioStreamError("payload_not_sample_aligned")
+        if len(pcm) > AUDIO_MAX_STREAM_BYTES:
+            raise AudioStreamError("stream_too_large")
+        if self._audio_active:
+            raise AudioStreamError("stream_already_active")
+
+        stream = OutboundAudioStream(stream_id, expected_bytes=len(pcm))
+        self._audio_active = True
+        started = time.monotonic()
+        chunks = chunk_payload(pcm)
+        try:
+            await self.send("AUDIO_BEGIN", **stream.begin_message())
+            for payload in chunks:
+                await self.websocket.send_bytes(stream.next_chunk(payload))
+            summary = stream.end_message()
+            await self.send("AUDIO_END", **summary)
+        except Exception as error:
+            # Best effort: if the socket is already gone the device aborts on
+            # its own disconnect path.
+            with contextlib.suppress(Exception):
+                await self.send("AUDIO_ABORT", **stream.abort_message(str(error)))
+            raise
+        finally:
+            self._audio_active = False
+        return {
+            **summary,
+            "durationSeconds": round(duration_seconds(len(pcm)), 3),
+            "elapsedSeconds": round(time.monotonic() - started, 3),
+        }
 
     async def send(self, message_type: str, **payload) -> None:
         if self.websocket is None:

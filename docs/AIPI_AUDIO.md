@@ -8,11 +8,16 @@ mode at 16 kHz PCM16 with a 4.096 MHz MCLK, and the owner audibly confirmed a
 clear bounded test tone. See `AIPI_CUSTOM_FIRMWARE.md` for the register values,
 pin evidence, binary hash, and serial log.
 
-That validation covers speaker output only. The firmware currently exposes a
-single bounded 880 Hz / 400 ms diagnostic tone gated on the authenticated
-ONLINE connection and an explicit GPIO42 press. It does not yet accept streamed
-PCM. The protocol below describes the target playback path, not shipped
-firmware behavior.
+Streamed network playback is also VERIFIED as of 2026-08-26 on firmware
+`0.3.0-audio-stream`. The owner heard both a deterministic 440 Hz tone and the
+intelligible synthesized phrase "Jarvis voice terminal online." delivered from
+Jarvis over the authenticated LAN WebSocket to the physical speaker. The
+deterministic tone was validated first, on purpose, so that transport,
+framing, and the speaker path were proven independently of speech synthesis.
+
+Local TTS is working. The previously recorded FAIL was environment-specific
+rather than a code defect. Empty synthesis is still rejected rather than
+reported as success.
 
 Microphone capture and STT remain disabled on the device and are a separate
 gated phase that must not begin until streamed output playback passes on its
@@ -21,8 +26,12 @@ own.
 ## Protocol
 
 Jarvis owns TTS and STT. The terminal streams and plays audio; it does not run
-the main AI. Protocol v1 uses PCM signed 16-bit little-endian mono, initially at
-16 kHz, in frames no larger than 16 KiB. The ESP32 implementation must use a
+the main AI. The canonical format is PCM signed 16-bit little-endian mono at
+16 kHz, in 2048-byte chunks (1024 samples, 64 ms), capped at 4096 bytes per
+chunk and 30 seconds per stream. Exactly one format is supported: the ES8311 is
+physically validated at it, macOS `say` produces it natively, and
+Whisper-family recognition expects it, so nothing in the local path resamples.
+See `devices/audio_stream.py`, whose constants the firmware mirrors. The ESP32 implementation must use a
 small bounded queue and report underflow/overflow rather than allocating an
 entire response in RAM.
 
