@@ -327,8 +327,19 @@ esp_err_t audio_input_begin(void) {
                         ESP_ERR_INVALID_STATE, TAG, "speaker busy");
     esp_err_t result = es8311_codec_initialize_input();
     if (result != ESP_OK) goto fail;
-    result = i2s_channel_enable(rx_channel);
+    /* TX and RX share BCLK and WS in full duplex, and this port is the master,
+     * so the clocks only run while TX is enabled. Enabling TX with the codec
+     * muted and the amplifier off gives RX a clock without producing sound. */
+    result = es8311_codec_set_muted(true);
     if (result != ESP_OK) goto fail;
+    amplifier_set(false);
+    result = i2s_channel_enable(tx_channel);
+    if (result != ESP_OK) goto fail;
+    result = i2s_channel_enable(rx_channel);
+    if (result != ESP_OK) {
+        i2s_channel_disable(tx_channel);
+        goto fail;
+    }
     result = es8311_codec_set_input_muted(false);
     if (result != ESP_OK) {
         i2s_channel_disable(rx_channel);
@@ -349,14 +360,20 @@ esp_err_t audio_input_read(uint8_t *buffer, size_t bytes, size_t *out_bytes,
     /* The codec runs stereo slots, so captured frames are stereo pairs of a
      * mono source. Read into a bounded stack buffer and keep the left channel,
      * producing the canonical mono stream without allocating. */
-    int16_t stereo[CHUNK_SAMPLES * 2];
+    /* Static for the same reason as the capture buffers: this is 1 KB, called
+     * only from the single capture task, and keeping it off the stack is what
+     * stops the task overflowing. */
+    static int16_t stereo[CHUNK_SAMPLES * 2];
     size_t mono_wanted = bytes / sizeof(int16_t);
     if (mono_wanted > CHUNK_SAMPLES) mono_wanted = CHUNK_SAMPLES;
     size_t read_bytes = 0;
     esp_err_t result = i2s_channel_read(rx_channel, stereo,
                                         mono_wanted * 2 * sizeof(int16_t),
                                         &read_bytes, pdMS_TO_TICKS(timeout_ms));
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "I2S capture read failed: %s", esp_err_to_name(result));
+        return result;
+    }
     size_t frames = read_bytes / (2 * sizeof(int16_t));
     int16_t *mono = (int16_t *)buffer;
     for (size_t i = 0; i < frames; ++i) mono[i] = stereo[i * 2];
@@ -368,6 +385,7 @@ void audio_input_end(void) {
     if (!capturing) return;
     es8311_codec_set_input_muted(true);
     i2s_channel_disable(rx_channel);
+    i2s_channel_disable(tx_channel);
     capturing = false;
     xSemaphoreGive(playback_lock);
     ESP_LOGI(TAG, "microphone capture END");

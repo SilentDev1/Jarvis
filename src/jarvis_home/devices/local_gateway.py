@@ -12,7 +12,13 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 
 from ..config import get_settings
-from ..core.speech import MacSayTTS
+from ..core.speech import MacSayTTS, PCM16Audio
+from ..core.speech_input import (
+    FasterWhisperSTT,
+    UtteranceFilter,
+    rms,
+    voiced_fraction,
+)
 from ..persistence import Store
 from .audio_stream import (
     AUDIO_MAX_BINARY_FRAME_BYTES,
@@ -30,6 +36,7 @@ from .local_protocol import (
     LocalDeviceHub,
     parse_message,
 )
+from .terminal_state import TerminalState
 
 cfg = get_settings()
 store = Store(cfg.data_dir / "jarvis.db")
@@ -37,6 +44,19 @@ store.init()
 hub = LocalDeviceHub(store)
 limiter = ConnectionFloodLimiter()
 logger = logging.getLogger("jarvis_home.device_gateway")
+
+# One shared recogniser and filter: the model costs seconds to load and the
+# filter's echo memory must persist across turns to catch Jarvis hearing itself.
+stt = FasterWhisperSTT()
+utterance_filter = UtteranceFilter()
+
+
+def peak_level(pcm: bytes) -> int:
+    if len(pcm) < 2:
+        return 0
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    return max((abs(value) for value in samples), default=0)
 
 
 def generate_tone(frequency: int, milliseconds: int, amplitude: int = 12000) -> bytes:
@@ -144,7 +164,56 @@ async def speak(request: Request):
         result = await hub.play_pcm(audio.data)
     except AudioStreamError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    # Remember what was said so the microphone does not act on its own echo.
+    utterance_filter.remember_spoken(text)
     return {**result, "text": text}
+
+
+@app.post("/internal/listen")
+async def listen(request: Request):
+    """Capture one bounded utterance and transcribe it locally.
+
+    Runs the full input path: half-duplex gating, bounded capture, the noise
+    and echo filters, then local recognition. Returns why an utterance was
+    rejected rather than silently producing nothing, so a failed listen is
+    diagnosable.
+    """
+    _authorize_loopback_admin(request)
+    payload = await request.json() if await request.body() else {}
+    milliseconds = int(payload.get("milliseconds", 5000))
+    if not 500 <= milliseconds <= 15000:
+        raise HTTPException(status_code=400, detail="out_of_range")
+
+    hub.terminal.transition(TerminalState.LISTENING)
+    try:
+        pcm = await hub.listen(max_milliseconds=milliseconds)
+    except AudioStreamError as error:
+        hub.terminal.transition(TerminalState.IDLE)
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    hub.terminal.transition(TerminalState.IDLE)
+
+    audio = PCM16Audio(data=pcm)
+    stats = {
+        "bytes": len(pcm),
+        "durationSeconds": round(
+            len(pcm) / (AUDIO_SAMPLE_RATE * 2), 3
+        ),
+        "rms": round(rms(pcm), 5),
+        "voicedFraction": round(voiced_fraction(pcm), 3),
+        "peak": peak_level(pcm),
+    }
+    gate = utterance_filter.check_audio(audio)
+    if not gate.accepted:
+        return {**stats, "accepted": False, "reason": gate.reason, "transcript": ""}
+    text = await stt.transcribe(audio)
+    decision = utterance_filter.check_transcript(text)
+    return {
+        **stats,
+        "accepted": decision.accepted,
+        "reason": decision.reason,
+        "transcript": decision.transcript if decision.accepted else "",
+        "rawTranscript": text,
+    }
 
 
 @app.websocket("/ws/device")

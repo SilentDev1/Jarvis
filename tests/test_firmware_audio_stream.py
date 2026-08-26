@@ -177,3 +177,29 @@ def test_audio_frame_reassembly_is_bounded_and_static():
         "static void process_control(", 1)[0]
     assert "malloc" not in frame
     assert "audio_frame_filled + event->data_len > MAX_AUDIO_FRAME_BYTES" in frame
+
+
+def test_capture_buffers_are_static_not_on_the_task_stack():
+    # These buffers total about 2 KB and overflowed a 4 KB task stack, which
+    # rebooted the device the first time capture ran.
+    connection = read("local_connection.c")
+    assert "static uint8_t capture_chunk[" in connection
+    assert "static uint8_t capture_frame[" in connection
+    capture = connection.split("static void capture_task(", 1)[1].split(
+        "static void process_control(", 1)[0]
+    assert "uint8_t chunk[" not in capture
+    assert "uint8_t frame[" not in capture
+    assert '"aipi_capture", 6144' in connection
+    # The stereo de-interleave buffer is on the same path.
+    assert "static int16_t stereo[CHUNK_SAMPLES * 2];" in read("audio_output.c")
+
+
+def test_capture_read_size_is_a_constant_not_sizeof_a_pointer():
+    # capture_chunk is reached through a pointer, so sizeof() on it yields the
+    # pointer width, not the buffer size. That silently reduced every read to
+    # 4 bytes and captured about 6% of the audio.
+    connection = read("local_connection.c")
+    capture = connection.split("static void capture_task(", 1)[1].split(
+        "static void process_control(", 1)[0]
+    assert "sizeof(chunk)" not in capture
+    assert "audio_input_read(chunk, AUDIO_MIC_CHUNK_BYTES" in capture

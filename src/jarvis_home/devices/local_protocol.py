@@ -25,7 +25,12 @@ SUBPROTOCOL = "jarvis.device.v1"
 MAX_CONTROL_BYTES = 4096
 HEARTBEAT_INTERVAL_SECONDS = 30
 HEARTBEAT_TIMEOUT_SECONDS = 75
-ALLOWED_CAPABILITIES = {"DISPLAY", "BUTTON", "WIFI", "LOCAL_CONNECTION", "STATUS"}
+ALLOWED_CAPABILITIES = {
+    "DISPLAY", "BUTTON", "WIFI", "LOCAL_CONNECTION", "STATUS",
+    # Advertised once the physical speaker and microphone were validated. The
+    # gateway gates audio on these rather than assuming every device has them.
+    "SPEAKER", "MICROPHONE",
+}
 
 
 def message(message_type: str, **payload) -> dict:

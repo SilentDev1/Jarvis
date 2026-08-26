@@ -18,7 +18,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.3.2-audio-watchdog"
+#define FIRMWARE_VERSION "0.4.3-mic-timing"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -87,7 +87,8 @@ static void send_hello(void) {
     cJSON_AddStringToObject(root, "deviceId", DEVICE_ID);
     cJSON_AddStringToObject(root, "firmwareVersion", FIRMWARE_VERSION);
     cJSON *capabilities = cJSON_AddArrayToObject(root, "capabilities");
-    const char *items[] = {"DISPLAY", "BUTTON", "WIFI", "LOCAL_CONNECTION", "STATUS"};
+    const char *items[] = {"DISPLAY", "BUTTON", "WIFI", "LOCAL_CONNECTION",
+                           "STATUS", "SPEAKER", "MICROPHONE"};
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString(items[i]));
     }
@@ -186,10 +187,18 @@ static void process_audio_frame(esp_websocket_event_data_t *event,
  * capture_max_ms and by an explicit stop, and the microphone is always torn
  * down on the way out, including on send failure, so the ADC is never left
  * live because a message was missed. Nothing is buffered beyond one chunk. */
+/* Static rather than on the task stack. Together these buffers are about 2 KB,
+ * which overflowed a 4 KB task stack and rebooted the device the first time
+ * capture ran. Only one capture task ever exists, guarded by capture_task_handle
+ * and by the shared playback lock, so static storage is safe and keeps the
+ * footprint fixed instead of stack-dependent. */
+static uint8_t capture_chunk[AUDIO_MIC_CHUNK_BYTES];
+static uint8_t capture_frame[AUDIO_FRAME_HEADER_BYTES + AUDIO_MIC_CHUNK_BYTES];
+
 static void capture_task(void *unused) {
     (void)unused;
-    uint8_t chunk[AUDIO_MIC_CHUNK_BYTES];
-    uint8_t frame[AUDIO_FRAME_HEADER_BYTES + AUDIO_MIC_CHUNK_BYTES];
+    uint8_t *chunk = capture_chunk;
+    uint8_t *frame = capture_frame;
     uint32_t sequence = 0;
     uint32_t sent_bytes = 0;
     const uint32_t max_bytes =
@@ -222,10 +231,13 @@ static void capture_task(void *unused) {
             break;
         }
         size_t got = 0;
-        if (audio_input_read(chunk, sizeof(chunk), &got, 500) != ESP_OK || got == 0) {
+        int64_t t0 = esp_timer_get_time();
+        if (audio_input_read(chunk, AUDIO_MIC_CHUNK_BYTES, &got, 500) != ESP_OK ||
+            got == 0) {
             reason = "read_failed";
             break;
         }
+        int64_t t1 = esp_timer_get_time();
         frame[0] = AUDIO_FRAME_MAGIC_0;
         frame[1] = AUDIO_FRAME_MAGIC_1;
         frame[2] = (uint8_t)(capture_stream_id & 0xFF);
@@ -241,6 +253,12 @@ static void capture_task(void *unused) {
         if (written < 0) {
             reason = "send_failed";
             break;
+        }
+        int64_t t2 = esp_timer_get_time();
+        if (sequence < 4) {
+            ESP_LOGD(TAG, "capture timing seq=%lu got=%u read=%lldus send=%lldus",
+                     (unsigned long)sequence, (unsigned)got,
+                     (long long)(t1 - t0), (long long)(t2 - t1));
         }
         sequence++;
         sent_bytes += got;
@@ -338,7 +356,7 @@ static void process_control(const char *data, int length) {
                 ? (uint32_t)max_ms->valuedouble : AUDIO_MIC_DEFAULT_MS;
             if (capture_max_ms > AUDIO_MIC_MAX_MS) capture_max_ms = AUDIO_MIC_MAX_MS;
             capture_stop_requested = false;
-            if (xTaskCreate(capture_task, "aipi_capture", 4096, NULL, 5,
+            if (xTaskCreate(capture_task, "aipi_capture", 6144, NULL, 5,
                             &capture_task_handle) != pdPASS) {
                 capture_task_handle = NULL;
                 ESP_LOGE(TAG, "LISTEN_START failed: no memory for capture task");
