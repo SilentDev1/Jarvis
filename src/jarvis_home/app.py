@@ -463,6 +463,15 @@ async def create_visitor_session(sid: str):
             state.known_person_name = recognized_name
             state.face_match_status = "KNOWN_HIGH_CONFIDENCE"
     greeting = greeting_policy.greeting(recognized_name)
+    if not cfg.camera_greeting_enabled:
+        # The visitor session, snapshot and recognition still run; only the
+        # unprompted speech is withheld. Enable once the zones are confirmed
+        # against the real door view.
+        bus.publish(
+            "voice.greeting_suppressed",
+            {"session_id": sid, "reason": "camera_greeting_disabled"},
+        )
+        return state
     delivered = await voice_service.begin(sid, greeting)
     if delivered:
         state.turns.append({"role": "assistant", "content": greeting})

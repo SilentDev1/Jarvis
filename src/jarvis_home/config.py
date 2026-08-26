@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     presence_freshness_seconds: float = Field(3, ge=1, le=15)
     presence_hold_seconds: float = Field(2.5, ge=0, le=10)
     voice_satellite: str = "simulator"
+    # Camera-triggered greeting speaks to strangers unprompted, so it is off
+    # until the zones have been drawn for the actual door view and confirmed.
+    # Wrong zones greet passers-by on the street or household members crossing
+    # a room, which is worse than not greeting at all.
+    camera_greeting_enabled: bool = False
     local_device_gateway_url: str = "http://127.0.0.1:8767"
     visitor_listen_timeout_seconds: float = Field(15, ge=3, le=120)
     visitor_conversation_max_seconds: float = Field(120, ge=15, le=600)
