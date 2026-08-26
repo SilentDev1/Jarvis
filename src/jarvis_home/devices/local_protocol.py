@@ -15,6 +15,7 @@ from .audio_stream import (
     chunk_payload,
     duration_seconds,
 )
+from .terminal_state import TerminalState, TerminalStateMachine
 
 PROTOCOL_VERSION = 1
 SUBPROTOCOL = "jarvis.device.v1"
@@ -102,6 +103,9 @@ class LocalDeviceHub:
         # Only one utterance may be in flight; a second would interleave on the
         # device and leave amplifier ownership ambiguous.
         self._audio_active = False
+        # The single authoritative terminal state. Audio, display, and the arc
+        # reactor all read this rather than tracking their own.
+        self.terminal = TerminalStateMachine()
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -123,6 +127,8 @@ class LocalDeviceHub:
             if self.websocket is not None:
                 await self.websocket.close(code=1013, reason="device_replaced")
             self.websocket = websocket
+            if self.terminal.state is not TerminalState.IDLE:
+                self.terminal.transition(TerminalState.IDLE)
             now = time.time()
             self.health = LocalDeviceHealth(
                 connected=True,
@@ -138,6 +144,7 @@ class LocalDeviceHub:
             if websocket is not None and websocket is not self.websocket:
                 return
             self.websocket = None
+            self.terminal.transition(TerminalState.OFFLINE)
             self.health.connected = False
             self.health.ready = False
             self.health.terminal_state = "JARVIS_OFFLINE"
@@ -164,6 +171,10 @@ class LocalDeviceHub:
         if self._audio_active:
             raise AudioStreamError("stream_already_active")
 
+        # Half-duplex: entering SPEAKING is what closes the microphone, and it
+        # is done here rather than by the caller so playback can never run with
+        # the microphone still open.
+        self.terminal.transition(TerminalState.SPEAKING)
         stream = OutboundAudioStream(stream_id, expected_bytes=len(pcm))
         self._audio_active = True
         started = time.monotonic()
@@ -182,6 +193,9 @@ class LocalDeviceHub:
             raise
         finally:
             self._audio_active = False
+            # Leaving SPEAKING starts the settling delay before the microphone
+            # may reopen, on the success and the failure path alike.
+            self.terminal.transition(TerminalState.IDLE)
         return {
             **summary,
             "durationSeconds": round(duration_seconds(len(pcm)), 3),

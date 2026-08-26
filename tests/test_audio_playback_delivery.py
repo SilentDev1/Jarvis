@@ -8,6 +8,7 @@ from jarvis_home.devices.audio_stream import (
     decode_chunk,
 )
 from jarvis_home.devices.local_protocol import LocalDeviceHub
+from jarvis_home.devices.terminal_state import TerminalState
 
 
 class FakeSocket:
@@ -26,12 +27,31 @@ class FakeSocket:
 
 
 class FakeStore:
-    class Session:
-        def __enter__(self):
-            raise AssertionError("persistence must not be touched by playback")
+    """Counts session use so tests can assert playback stays off the database."""
 
-        def __exit__(self, *args):
-            return False
+    def __init__(self):
+        self.sessions = 0
+
+    def Session(self):
+        self.sessions += 1
+        return _NullSession()
+
+
+class _NullSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def add(self, *args, **kwargs):
+        return None
+
+    def commit(self):
+        return None
 
 
 def make_hub(ready=True, socket=None):
@@ -39,6 +59,9 @@ def make_hub(ready=True, socket=None):
     hub.websocket = socket if socket is not None else FakeSocket()
     hub.health.connected = True
     hub.health.ready = ready
+    # attach() puts a real connected device in IDLE; these tests set the socket
+    # directly, so mirror that rather than leaving the hub in BOOTING.
+    hub.terminal.transition(TerminalState.IDLE)
     return hub
 
 
@@ -101,3 +124,53 @@ async def test_only_one_stream_may_be_active():
     hub._audio_active = True
     with pytest.raises(AudioStreamError, match="stream_already_active"):
         await hub.play_pcm(b"\x00\x00")
+
+
+@pytest.mark.asyncio
+async def test_playback_drives_the_terminal_into_speaking_and_back():
+    hub = make_hub()
+    assert hub.terminal.state is TerminalState.IDLE
+    await hub.play_pcm(b"\x01\x02" * 100)
+    # Must return to IDLE so the settling delay starts and the mic can reopen.
+    assert hub.terminal.state is TerminalState.IDLE
+    assert (TerminalState.IDLE, TerminalState.SPEAKING) in hub.terminal.history
+
+
+@pytest.mark.asyncio
+async def test_microphone_is_closed_for_the_whole_utterance():
+    seen = []
+
+    class Watching(FakeSocket):
+        async def send_bytes(self, value):
+            seen.append(hub.terminal.microphone_allowed())
+            await super().send_bytes(value)
+
+    hub = make_hub(socket=Watching())
+    await hub.play_pcm(b"\x01\x02" * 2000)
+    assert seen and not any(seen), "microphone was open while speaking"
+
+
+@pytest.mark.asyncio
+async def test_failed_playback_still_leaves_speaking_state():
+    hub = make_hub(socket=FakeSocket(fail_on_bytes=True))
+    with pytest.raises(ConnectionResetError):
+        await hub.play_pcm(b"\x01\x02" * 100)
+    # A stuck SPEAKING state would keep the microphone closed forever.
+    assert hub.terminal.state is TerminalState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_disconnect_moves_the_terminal_offline():
+    hub = make_hub()
+    await hub.detach("test", hub.websocket)
+    assert hub.terminal.state is TerminalState.OFFLINE
+
+
+@pytest.mark.asyncio
+async def test_playback_never_touches_persistence():
+    # Streaming audio is a hot path; writing to the database per utterance
+    # would put disk IO between chunks.
+    hub = make_hub()
+    before = hub.store.sessions
+    await hub.play_pcm(b"\x01\x02" * 500)
+    assert hub.store.sessions == before

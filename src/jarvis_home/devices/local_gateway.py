@@ -74,7 +74,14 @@ app = FastAPI(title="Jarvis Local Device Gateway", docs_url=None, redoc_url=None
 
 @app.get("/health")
 async def health():
-    return {"status": "ready", "device": hub.health.public()}
+    return {
+        "status": "ready",
+        "device": hub.health.public(),
+        # The authoritative terminal state machine. `device.terminal_state` is
+        # what the board reports about itself; this is what Jarvis has decided,
+        # and it is the one audio, display, and the arc reactor consume.
+        "terminal": hub.terminal.public(),
+    }
 
 
 LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
