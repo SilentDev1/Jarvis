@@ -749,10 +749,38 @@ async def terminal_health_loop():
         await asyncio.sleep(10)
 
 
+def close_orphaned_sessions() -> int:
+    """Close visitor sessions the previous run left open.
+
+    The visitor state machine lives in memory, so a restart mid-session leaves
+    the database row active with nothing tracking it. Those sessions never
+    close on their own: one had been open for four days. Nobody can be at the
+    door at the instant this process starts, so any session still active here
+    is orphaned by definition.
+    """
+    closed = 0
+    with store.Session() as session:
+        for visit in session.query(VisitorSession).filter(
+            VisitorSession.status == "active"
+        ):
+            visit.status = "complete"
+            visit.departure_time = visit.departure_time or utcnow()
+            visit.conversation_summary = (
+                visit.conversation_summary or "Closed on restart; session was orphaned."
+            )
+            closed += 1
+        if closed:
+            session.commit()
+    return closed
+
+
 @asynccontextmanager
 async def lifespan(app):
     setup_logging()
     store.init()
+    orphaned = close_orphaned_sessions()
+    if orphaned:
+        logger.warning("Closed %d visitor session(s) orphaned by a restart", orphaned)
     bus.publish("system.started", {"version": "0.1.0"})
     vision_task = asyncio.create_task(live_vision_loop())
     cleanup_task = asyncio.create_task(media_cleanup_loop())
