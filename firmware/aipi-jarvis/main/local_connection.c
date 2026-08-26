@@ -6,6 +6,7 @@
 #include "bringup.h"
 #include "audio_output.h"
 #include "ota_update.h"
+#include "arc_light.h"
 #include "display_controller.h"
 #include "esp_ota_ops.h"
 #include "cJSON.h"
@@ -24,7 +25,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "1.1.1-jarvis-hud"
+#define FIRMWARE_VERSION "1.2.0-arc-light"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -131,6 +132,8 @@ static void send_status(void) {
     cJSON_AddStringToObject(root, "displayStatus", online ? "ONLINE" : "OFFLINE");
     cJSON_AddStringToObject(root, "buttonStatus", "READY");
     cJSON_AddStringToObject(root, "terminalState", online ? "JARVIS_ONLINE" : "AUTHENTICATING");
+    cJSON_AddBoolToObject(root, "arcLightAvailable", arc_light_available());
+    cJSON_AddBoolToObject(root, "arcLightEnabled", arc_light_enabled());
     cJSON_AddStringToObject(root, "otaSlot", ota_update_running_slot());
     cJSON_AddBoolToObject(root, "otaPendingVerify", ota_update_pending_verify());
     send_json(root);
@@ -507,6 +510,20 @@ static void process_control(const char *data, int length) {
             /* UPDATING is driven locally by OTA progress, which is finer
              * grained than anything the host can push. */
         }
+    } else if (!strcmp(type->valuestring, "ARC_SETTINGS")) {
+        /* Owner settings arrive from Jarvis rather than being firmware
+         * constants, so brightness can be adjusted without a rebuild. */
+        cJSON *on = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+        cJSON *idle = cJSON_GetObjectItemCaseSensitive(root, "idleBrightness");
+        cJSON *active = cJSON_GetObjectItemCaseSensitive(root, "activeBrightness");
+        cJSON *quiet = cJSON_GetObjectItemCaseSensitive(root, "quietHours");
+        if (cJSON_IsNumber(idle) && cJSON_IsNumber(active)) {
+            arc_light_set_brightness(idle->valueint, active->valueint);
+        }
+        if (cJSON_IsBool(quiet)) arc_light_set_quiet(cJSON_IsTrue(quiet));
+        if (cJSON_IsBool(on)) arc_light_set_enabled(cJSON_IsTrue(on));
+        ESP_LOGI(TAG, "arc light settings applied (enabled=%s)",
+                 arc_light_enabled() ? "yes" : "no");
     } else if (!strcmp(type->valuestring, "LISTEN_STOP")) {
         capture_stop_requested = true;
     } else if (!strcmp(type->valuestring, "OTA_OFFER")) {

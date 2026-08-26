@@ -66,6 +66,15 @@ _PATTERN_SHAPE: dict[ArcPattern, tuple[float, float, float]] = {
 }
 
 FULL_SCALE = 32767.0
+
+# Owner-facing brightness policy. Percentages of full scale, clamped on the
+# device as well so a bad setting cannot drive the light hard.
+DEFAULT_IDLE_BRIGHTNESS = 12
+DEFAULT_ACTIVE_BRIGHTNESS = 45
+MAX_BRIGHTNESS = 80
+# Quiet hours dim rather than extinguish: an offline or listening terminal
+# still has something worth indicating at night.
+QUIET_SCALE_PERCENT = 25
 # Attack faster than release, so the light snaps to speech onsets but does not
 # flicker between syllables.
 ENVELOPE_ATTACK = 0.55
@@ -179,3 +188,54 @@ class ArcReactorController:
             pattern=pattern,
             enabled=self.enabled,
         )
+
+
+@dataclass
+class ArcLightSettings:
+    """Owner settings for the physical arc light.
+
+    Kept separate from the renderer so brightness can be changed without a
+    firmware rebuild, and so a device with no light simply ignores them.
+    """
+
+    enabled: bool = False
+    idle_brightness: int = DEFAULT_IDLE_BRIGHTNESS
+    active_brightness: int = DEFAULT_ACTIVE_BRIGHTNESS
+    audio_reactive: bool = True
+    quiet_hours_start: int = 22
+    quiet_hours_end: int = 7
+
+    def __post_init__(self) -> None:
+        # Clamp rather than reject: a settings mistake should dim the light,
+        # not stop the terminal from starting.
+        self.idle_brightness = max(0, min(MAX_BRIGHTNESS, int(self.idle_brightness)))
+        self.active_brightness = max(0, min(MAX_BRIGHTNESS, int(self.active_brightness)))
+        self.quiet_hours_start = int(self.quiet_hours_start) % 24
+        self.quiet_hours_end = int(self.quiet_hours_end) % 24
+
+    def is_quiet(self, hour: int) -> bool:
+        """Quiet hours may wrap past midnight, which the naive comparison misses."""
+        hour %= 24
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        if start == end:
+            return False
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
+
+    def effective_brightness(self, active: bool, hour: int | None = None) -> int:
+        if not self.enabled:
+            return 0
+        value = self.active_brightness if active else self.idle_brightness
+        if hour is not None and self.is_quiet(hour):
+            value = value * QUIET_SCALE_PERCENT // 100
+        return max(0, min(MAX_BRIGHTNESS, value))
+
+    def device_message(self, hour: int | None = None) -> dict:
+        quiet = self.is_quiet(hour) if hour is not None else False
+        return {
+            "enabled": self.enabled,
+            "idleBrightness": self.idle_brightness,
+            "activeBrightness": self.active_brightness,
+            "quietHours": quiet,
+        }

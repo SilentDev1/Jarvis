@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "arc_light.h"
 #include "display_render.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -241,10 +242,21 @@ esp_err_t display_controller_start(void) {
 
 bool display_controller_active(void) { return running && display_render_ready(); }
 
-void display_controller_set(jarvis_visual_t visual) { current = visual; }
+void display_controller_set(jarvis_visual_t visual) {
+    current = visual;
+    /* The light follows the same authoritative state as the screen. Routing it
+     * through here rather than duplicating the call sites means the two cannot
+     * drift apart. */
+    arc_light_set_state(visual);
+}
 jarvis_visual_t display_controller_get(void) { return current; }
 
-void display_controller_set_level(int level) { audio_level = level; }
+void display_controller_set_level(int level) {
+    audio_level = level;
+    /* Reuses the envelope already computed on the audio path; there is no
+     * second analysis pipeline. */
+    arc_light_set_level(level);
+}
 
 void display_controller_set_progress(int percent, const char *label) {
     ota_percent = percent;

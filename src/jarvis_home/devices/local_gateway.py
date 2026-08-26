@@ -8,6 +8,7 @@ import sys
 import time
 from array import array
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse
@@ -23,6 +24,11 @@ from ..core.speech_input import (
 )
 from ..integrations.providers import OllamaAI
 from ..persistence import Store
+from .arc_reactor import (
+    DEFAULT_ACTIVE_BRIGHTNESS,
+    DEFAULT_IDLE_BRIGHTNESS,
+    ArcLightSettings,
+)
 from .audio_stream import (
     AUDIO_MAX_BINARY_FRAME_BYTES,
     AUDIO_MAX_STREAM_SECONDS,
@@ -349,6 +355,31 @@ async def visitor_presence(request: Request):
     payload = await request.json() if await request.body() else {}
     await hub.set_visitor_present(bool(payload.get("present", False)))
     return {"visitorPresent": hub.visitor_present, "visual": hub.visual_for_state()}
+
+
+@app.post("/internal/arc-light")
+async def arc_light_settings(request: Request):
+    """Owner settings for the physical arc light.
+
+    Brightness and quiet hours live here rather than in firmware constants, so
+    adjusting them never needs a rebuild or a reflash.
+    """
+    _authorize_loopback_admin(request)
+    payload = await request.json() if await request.body() else {}
+    settings = ArcLightSettings(
+        enabled=bool(payload.get("enabled", False)),
+        idle_brightness=int(payload.get("idleBrightness", DEFAULT_IDLE_BRIGHTNESS)),
+        active_brightness=int(payload.get("activeBrightness", DEFAULT_ACTIVE_BRIGHTNESS)),
+        quiet_hours_start=int(payload.get("quietHoursStart", 22)),
+        quiet_hours_end=int(payload.get("quietHoursEnd", 7)),
+    )
+    # Quiet hours are a wall-clock policy, so local time is what the owner
+    # means; the timezone is made explicit rather than left naive.
+    hour = (int(payload["hour"]) if "hour" in payload
+            else datetime.now(UTC).astimezone().hour)
+    message = settings.device_message(hour=hour)
+    await hub.send("ARC_SETTINGS", **message)
+    return {"applied": message, "hour": hour}
 
 
 @app.websocket("/ws/device")

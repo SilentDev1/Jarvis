@@ -71,6 +71,8 @@ class LocalDeviceHealth:
     free_psram: int | None = None
     display_status: str | None = None
     button_status: str | None = None
+    arc_light_available: bool = False
+    arc_light_enabled: bool = False
     terminal_state: str = "JARVIS_OFFLINE"
     connected_at: float | None = None
     last_seen: float | None = None
@@ -501,6 +503,8 @@ class LocalDeviceHub:
             self.health.free_psram = _bounded_int(value.get("freePsram"), 0, 2**31)
             self.health.display_status = _bounded_text(value.get("displayStatus"), 40)
             self.health.button_status = _bounded_text(value.get("buttonStatus"), 20)
+            self.health.arc_light_available = bool(value.get("arcLightAvailable", False))
+            self.health.arc_light_enabled = bool(value.get("arcLightEnabled", False))
             self.health.terminal_state = _bounded_text(
                 value.get("terminalState"), 30
             ) or "JARVIS_ONLINE"

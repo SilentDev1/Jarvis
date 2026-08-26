@@ -4,6 +4,8 @@ dependencies:
   idf:
     version: ">=5.3.0,<5.4.0"
   espressif/esp_websocket_client: "^1.4.0"
+  # Onboard single-pixel WS2812 status LED on GPIO46.
+  espressif/led_strip: "^3.0.3"
   # # Put list of dependencies here
   # # For components maintained by Espressif:
   # component: "~1.0.0"

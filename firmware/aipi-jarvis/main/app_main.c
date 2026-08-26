@@ -1,5 +1,6 @@
 #include "aipi_board.h"
 #include "bringup.h"
+#include "arc_light.h"
 #include "display_controller.h"
 #include "audio_output.h"
 #include "esp_chip_info.h"
@@ -45,6 +46,9 @@ void app_main(void) {
     if (display_controller_start() == ESP_OK) {
         display_controller_set(JARVIS_VISUAL_BOOT);
     }
+    /* Onboard WS2812. Initialised so it is ready, but left disabled: a light
+     * at a front door switching itself on is the owner's decision. */
+    arc_light_init(ARC_BACKEND_ONBOARD);
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "initializing custom NVS partition; factory NVS at 0x9000 is untouched");
