@@ -18,7 +18,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.3.0-audio-stream"
+#define FIRMWARE_VERSION "0.3.2-audio-watchdog"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -104,43 +104,74 @@ static void send_status(void) {
     send_json(root);
 }
 
-/* Validates and plays one binary audio frame.
+/* Reassembles and plays one binary audio frame.
+ *
+ * esp_websocket_client delivers a payload in fragments whenever the frame does
+ * not arrive in a single read, which happens routinely once a stream runs for
+ * more than a few seconds. Rejecting fragments outright truncated long
+ * utterances part-way through, so fragments are accumulated into a fixed
+ * buffer sized for one maximum frame. The buffer is static and bounded: no
+ * allocation, and a stream cannot grow device memory however long Jarvis
+ * speaks.
  *
  * Every rejection aborts the stream rather than skipping the chunk: silently
  * dropping a chunk would emit a glitch and desynchronise the sequence, and a
- * stream that is already malformed has no claim on the amplifier. */
+ * stream already known malformed has no claim on the amplifier. */
+static uint8_t audio_frame[MAX_AUDIO_FRAME_BYTES];
+static size_t audio_frame_filled;
+
+static void audio_frame_fail(const char *reason) {
+    audio_playback_abort(reason);
+    active_stream_id = 0;
+    audio_frame_filled = 0;
+}
+
 static void process_audio_frame(esp_websocket_event_data_t *event,
-                                const uint8_t *frame) {
+                                const uint8_t *data) {
     if (!audio_playback_active() || active_stream_id == 0) return;
-    if (event->payload_offset != 0 || event->data_len != event->payload_len ||
-        event->payload_len < AUDIO_FRAME_HEADER_BYTES + 2 ||
+    if (event->payload_len < AUDIO_FRAME_HEADER_BYTES + 2 ||
         event->payload_len > MAX_AUDIO_FRAME_BYTES) {
-        audio_playback_abort("frame_bounds");
-        active_stream_id = 0;
+        audio_frame_fail("frame_bounds");
         return;
     }
-    if (frame[0] != AUDIO_FRAME_MAGIC_0 || frame[1] != AUDIO_FRAME_MAGIC_1) {
-        audio_playback_abort("bad_magic");
-        active_stream_id = 0;
+    /* A fragment must continue exactly where the previous one ended; anything
+     * else means frames have interleaved and the stream is no longer trusted. */
+    if (event->payload_offset == 0) audio_frame_filled = 0;
+    if ((size_t)event->payload_offset != audio_frame_filled) {
+        audio_frame_fail("frame_desync");
         return;
     }
-    uint16_t stream_id = (uint16_t)(frame[2] | (frame[3] << 8));
-    uint32_t sequence = (uint32_t)frame[4] | ((uint32_t)frame[5] << 8) |
-                        ((uint32_t)frame[6] << 16) | ((uint32_t)frame[7] << 24);
+    if (audio_frame_filled + event->data_len > MAX_AUDIO_FRAME_BYTES) {
+        audio_frame_fail("frame_bounds");
+        return;
+    }
+    memcpy(audio_frame + audio_frame_filled, data, event->data_len);
+    audio_frame_filled += event->data_len;
+    if (audio_frame_filled < (size_t)event->payload_len) return;  /* incomplete */
+
+    size_t frame_len = audio_frame_filled;
+    audio_frame_filled = 0;
+
+    if (audio_frame[0] != AUDIO_FRAME_MAGIC_0 || audio_frame[1] != AUDIO_FRAME_MAGIC_1) {
+        audio_frame_fail("bad_magic");
+        return;
+    }
+    uint16_t stream_id = (uint16_t)(audio_frame[2] | (audio_frame[3] << 8));
+    uint32_t sequence = (uint32_t)audio_frame[4] | ((uint32_t)audio_frame[5] << 8) |
+                        ((uint32_t)audio_frame[6] << 16) | ((uint32_t)audio_frame[7] << 24);
     if (stream_id != active_stream_id) {
-        audio_playback_abort("stream_id_mismatch");
-        active_stream_id = 0;
+        audio_frame_fail("stream_id_mismatch");
         return;
     }
     if (sequence != expected_sequence) {
-        audio_playback_abort("sequence_gap");
-        active_stream_id = 0;
+        audio_frame_fail("sequence_gap");
         return;
     }
     expected_sequence++;
-    if (audio_playback_write(frame + AUDIO_FRAME_HEADER_BYTES,
-                             event->data_len - AUDIO_FRAME_HEADER_BYTES) != ESP_OK) {
+    if (audio_playback_write(audio_frame + AUDIO_FRAME_HEADER_BYTES,
+                             frame_len - AUDIO_FRAME_HEADER_BYTES) != ESP_OK) {
         active_stream_id = 0;
+        audio_frame_filled = 0;
     }
 }
 
@@ -185,6 +216,7 @@ static void process_control(const char *data, int length) {
             } else {
                 active_stream_id = stream->valueint;
                 expected_sequence = 0;
+                audio_frame_filled = 0;
                 esp_err_t result = audio_playback_begin(
                     (uint32_t)rate->valueint, (uint8_t)channels->valueint,
                     (uint8_t)bits->valueint,
@@ -213,6 +245,7 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
         online = false;
         audio_playback_abort("reconnected");
         active_stream_id = 0;
+        audio_frame_filled = 0;
         audio_output_set_manual_test_enabled(false);
         bringup_display_status("JARVIS", "WI-FI: OK", "AUTHENTICATING");
         send_hello();
@@ -229,6 +262,7 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
          * enabled waiting for chunks that will never arrive. */
         audio_playback_abort("connection_lost");
         active_stream_id = 0;
+        audio_frame_filled = 0;
         online = false;
         bringup_display_status("JARVIS", "WI-FI: OK", "JARVIS: OFFLINE");
         if (reconnect_task_handle) xTaskNotifyGive(reconnect_task_handle);

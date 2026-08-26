@@ -167,6 +167,10 @@ static void button_task(void *unused) {
                 prior = stable;
             }
         }
+        /* Drive the playback stall watchdog from this existing periodic task
+         * rather than spawning another one. Without a caller the watchdog is
+         * dead code and a wedged sender could hold the amplifier open. */
+        audio_playback_poll_timeout();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

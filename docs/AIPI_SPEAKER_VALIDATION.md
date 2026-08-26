@@ -173,3 +173,73 @@ the LAN for the terminal never exposes the ability to make the house speak.
 
 Speaker output only. Microphone capture, STT, wake word, half-duplex
 sequencing, and camera-triggered speech remain disabled and separately gated.
+
+
+---
+
+# Long-stream reassembly and amplifier fail-safe
+
+Date: 2026-08-26 (America/New_York)
+Firmware: `0.3.2-audio-watchdog`
+Binary SHA-256: `02c3e9768bb1f167d9dfce6f38bfc717f2727446000144e46c91c0e37b20ce35`
+
+## Defect found after the first streaming PASS
+
+The 2.096-second validation phrase passed, but a deterministic 5-second stream
+aborted at 145,408 of 160,000 bytes with `frame_bounds`, with nothing
+interfering. `esp_websocket_client` delivers a payload in fragments whenever it
+does not arrive in a single read, which happens routinely once a stream runs
+past a few seconds. The frame validator rejected any fragmented delivery, so
+every utterance longer than roughly four seconds was truncated part-way
+through. The short validation phrase was simply too short to expose it.
+
+Fragments are now accumulated into a static buffer sized for exactly one
+maximum frame. Reassembly is bounded and allocation-free, so device memory does
+not grow with utterance length. A fragment whose offset does not continue the
+previous one aborts the stream as `frame_desync` rather than being stitched
+into a corrupt frame.
+
+After the fix the same 5-second stream completed: 160,000 bytes,
+`result=ESP_OK`, amplifier window 5.04 s against 5.000 s of audio.
+
+## Second defect: the stall watchdog was dead code
+
+`audio_playback_poll_timeout()` was defined but never called, so the stall
+timeout could not fire and a wedged sender could have held the amplifier open.
+The existing periodic button task now drives it rather than spawning a second
+task. The regression test was strengthened: asserting that the watchdog exists
+was what allowed dead code to look verified, so the test now asserts it is
+actually invoked.
+
+## Disconnect cleanup: PASS
+
+A 28-second utterance (896,000 bytes) was started and the gateway was killed
+three seconds in:
+
+```text
+I (23574) jarvis_audio: playback START rate=16000 expected=896000 bytes
+W (30684) jarvis_local: local Jarvis connection OFFLINE; reconnecting
+W (30684) jarvis_audio: playback ABORT reason=connection_lost bytes=227328
+I (30684) jarvis_audio: speaker amplifier DISABLED
+```
+
+The stream aborted at 227,328 bytes and the amplifier was dropped by the
+`connection_lost` path. The device then reconnected without a reboot.
+
+An earlier attempt at this test was inconclusive and is worth recording: a
+5-second utterance is buffered by the sender almost instantly (gateway reports
+`elapsedSeconds: 0.0`) and paced by device-side I2S, so killing the gateway
+one second in did not interrupt anything. Only a stream too large to buffer
+exercises the disconnect path. A shorter test would have produced a false PASS.
+
+## Authorization: PASS
+
+`/internal/speak` returns 401 with no token and with a wrong token, and 404
+from a non-loopback address, so the endpoint is not even discoverable from the
+LAN the terminal sits on.
+
+## Bounds: PASS
+
+A request beyond the 30-second stream limit is rejected before any device
+traffic. The tone endpoint's own limit was aligned to the protocol bound rather
+than being a second, stricter number, so tests exercise the real boundary.

@@ -13,7 +13,12 @@ from fastapi.websockets import WebSocketDisconnect
 from ..config import get_settings
 from ..core.speech import MacSayTTS
 from ..persistence import Store
-from .audio_stream import AUDIO_SAMPLE_RATE, AudioStreamError, validate_format
+from .audio_stream import (
+    AUDIO_MAX_STREAM_SECONDS,
+    AUDIO_SAMPLE_RATE,
+    AudioStreamError,
+    validate_format,
+)
 from .auth import authenticate_device
 from .local_protocol import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -99,7 +104,11 @@ async def play_test_tone(request: Request):
     payload = await request.json() if await request.body() else {}
     frequency = int(payload.get("frequency", 440))
     milliseconds = int(payload.get("milliseconds", 1000))
-    if not 100 <= frequency <= 4000 or not 100 <= milliseconds <= 5000:
+    # Bounded by the protocol's own stream limit rather than a second, stricter
+    # number, so the tone can exercise the real boundary.
+    if not 100 <= frequency <= 4000:
+        raise HTTPException(status_code=400, detail="out_of_range")
+    if not 100 <= milliseconds <= AUDIO_MAX_STREAM_SECONDS * 1000:
         raise HTTPException(status_code=400, detail="out_of_range")
     pcm = generate_tone(frequency, milliseconds)
     try:

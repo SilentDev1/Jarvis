@@ -76,10 +76,15 @@ def test_audio_frames_are_validated_before_reaching_the_speaker():
     connection = read("local_connection.c")
     frame = connection.split("static void process_audio_frame(", 1)[1].split(
         "static void process_control(", 1)[0]
-    for reason in ("frame_bounds", "bad_magic", "stream_id_mismatch", "sequence_gap"):
-        assert f'audio_playback_abort("{reason}")' in frame
-    # Fragmented frames must be rejected, not reassembled blindly.
-    assert "payload_offset != 0" in frame
+    for reason in ("frame_bounds", "bad_magic", "stream_id_mismatch", "sequence_gap",
+                   "frame_desync"):
+        assert f'audio_frame_fail("{reason}")' in frame
+    # Every failure path must clear reassembly state as well as abort, or the
+    # next stream would resume onto a stale partial frame.
+    helper = connection.split("static void audio_frame_fail(", 1)[1].split("}", 1)[0]
+    assert "audio_playback_abort(reason)" in helper
+    assert "active_stream_id = 0" in helper
+    assert "audio_frame_filled = 0" in helper
 
 
 def test_playback_requires_an_authenticated_ready_session():
@@ -115,3 +120,26 @@ def test_project_version_matches_the_reported_firmware_version():
     connection = read("local_connection.c")
     version = connection.split('#define FIRMWARE_VERSION "', 1)[1].split('"', 1)[0]
     assert f'set(PROJECT_VER "{version}")' in cmake
+
+
+def test_stall_watchdog_is_actually_invoked():
+    # Defining the watchdog is not enough: without a caller it is dead code and
+    # a wedged sender could hold the amplifier open indefinitely.
+    callers = [
+        name for name in ("bringup.c", "local_connection.c", "app_main.c")
+        if "audio_playback_poll_timeout()" in read(name)
+    ]
+    assert callers, "audio_playback_poll_timeout() is never called"
+
+
+def test_audio_frame_reassembly_is_bounded_and_static():
+    connection = read("local_connection.c")
+    # Fragments must be reassembled, not rejected: rejecting them truncated
+    # every utterance longer than a few seconds.
+    assert "static uint8_t audio_frame[MAX_AUDIO_FRAME_BYTES];" in connection
+    assert "payload_offset == 0" in connection
+    assert "frame_desync" in connection
+    frame = connection.split("static void process_audio_frame(", 1)[1].split(
+        "static void process_control(", 1)[0]
+    assert "malloc" not in frame
+    assert "audio_frame_filled + event->data_len > MAX_AUDIO_FRAME_BYTES" in frame
