@@ -45,6 +45,14 @@ store = Store(cfg.data_dir / "jarvis.db")
 store.init()
 hub = LocalDeviceHub(store)
 limiter = ConnectionFloodLimiter()
+# uvicorn configures only its own loggers, so application records were being
+# dropped. A door terminal needs its voice turns visible in the log, otherwise
+# a wrong answer or a rejected utterance leaves no trace to diagnose.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+logging.getLogger("jarvis_home").setLevel(logging.INFO)
 logger = logging.getLogger("jarvis_home.device_gateway")
 
 # One shared recogniser and filter: the model costs seconds to load and the
@@ -92,8 +100,10 @@ async def _button_voice_turn():
     into the device receive loop."""
     try:
         turn = await voice_loop.run_turn()
-        logger.info("button voice turn: accepted=%s reason=%s",
-                    turn.accepted, turn.reason)
+        logger.info(
+            "button voice turn: accepted=%s reason=%s source=%s heard=%r reply=%r",
+            turn.accepted, turn.reason, turn.source, turn.heard, turn.reply,
+        )
     except Exception:
         logger.exception("button voice turn failed")
 

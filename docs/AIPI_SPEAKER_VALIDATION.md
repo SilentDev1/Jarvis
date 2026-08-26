@@ -329,3 +329,64 @@ was to ask rather than to start flashing speculative gain increases.
 
 Microphone capture and recognition only. Camera-triggered conversation and
 multi-turn visitor sessions remain separate phases.
+
+
+---
+
+# Manual physical voice loop
+
+Date: 2026-08-26 (America/New_York)
+Firmware: `0.6.0-voice-turn`
+
+## Result
+
+**MANUAL VOICE LOOP: PASS (software path).** A physical GPIO42 press ran a
+complete turn with no cloud involvement:
+
+```text
+button press reported to Jarvis
+speaker amplifier DISABLED
+microphone capture START rate=16000 PCM16
+BUTTON_UP
+microphone capture END
+microphone stream END bytes=192000 reason=complete
+speaker amplifier ENABLED
+playback START rate=16000 expected=94378 bytes
+playback END bytes=94378 result=ESP_OK
+speaker amplifier DISABLED
+```
+
+```text
+button voice turn: accepted=True reason=ok source=ai
+  heard='What is the weather?'
+  reply="I don't have access to the current weather data."
+```
+
+Capture ran 6.0 s (192,000 bytes), recognition and reasoning took about 3.3 s,
+and the spoken reply was 2.95 s. Nothing left the machine: recognition is
+faster-whisper locally, reasoning is the local Ollama model, synthesis is local.
+
+The amplifier is disabled before the microphone opens and re-enabled only to
+speak, visible in the trace above. That ordering is what stops the terminal
+hearing itself.
+
+## Defects found by running it, not by inspection
+
+The AI never answered. The shared `AIProvider` requests `format=json` and
+parses the model's content as JSON, while the voice prompt asked for a plain
+spoken sentence. Every real answer failed to parse and the terminal apologised
+instead. The prompt now asks for the shape the provider parses.
+
+Local answers were nearly unreachable. They matched exact phrases, but
+recognition of the same sentence varies run to run: "Is Jarvis online?" came
+back as "It's Jarvis Online." Matching is now on keyword sets.
+
+Voice turns were invisible in the log. uvicorn configures only its own loggers,
+so application records were dropped. A door terminal needs its turns logged, or
+a wrong answer leaves no trace to diagnose.
+
+## Still outstanding
+
+The owner has not yet confirmed hearing the spoken reply for this specific
+turn, so this is recorded as a software PASS. Camera-triggered greeting,
+multi-turn visitor sessions, and false-activation testing are separate phases.
