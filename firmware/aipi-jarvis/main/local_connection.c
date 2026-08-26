@@ -6,6 +6,7 @@
 #include "bringup.h"
 #include "audio_output.h"
 #include "ota_update.h"
+#include "display_controller.h"
 #include "esp_ota_ops.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
@@ -20,7 +21,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.9.1-wireless-ota"
+#define FIRMWARE_VERSION "1.0.1-jarvis-hud"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -46,19 +47,34 @@ const char *local_connection_firmware_version(void) {
     return FIRMWARE_VERSION;
 }
 
+/* Supervises the Jarvis connection.
+ *
+ * Deliberately not purely edge-triggered. Waiting forever on a disconnect
+ * notification wedges the device: esp_websocket_client_stop() followed by
+ * start() can return ESP_OK while the client never actually attempts a
+ * connection, so no event fires, no notification arrives, and the task blocks
+ * for good. The device stays on Wi-Fi and pingable while silently never
+ * reconnecting, which is indistinguishable from a hang for a terminal mounted
+ * at a front door.
+ *
+ * The wait therefore times out, so the loop re-checks the real connection
+ * state periodically whether or not an event was delivered. */
+#define RECONNECT_SUPERVISE_MS 10000
+
 static void reconnect_task(void *arg) {
     (void)arg;
     while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        /* Either a disconnect notification or the supervisory timeout. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RECONNECT_SUPERVISE_MS));
         if (!client || esp_websocket_client_is_connected(client)) continue;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        if (esp_websocket_client_is_connected(client)) continue;
         ESP_LOGI(TAG, "retrying configured local Jarvis gateway");
         esp_websocket_client_stop(client);
         xTaskNotifyStateClear(NULL);
         esp_err_t result = esp_websocket_client_start(client);
         if (result != ESP_OK) {
             ESP_LOGW(TAG, "local reconnect start failed: %s", esp_err_to_name(result));
-            xTaskNotifyGive(reconnect_task_handle);
         }
     }
 }
@@ -266,6 +282,15 @@ static void ota_confirm_task(void *unused) {
 }
 
 static void ota_report(const char *state, int percent, const char *detail) {
+    if (!strcmp(state, "FAILED")) {
+        display_controller_set_progress(0, NULL);
+        display_controller_set(JARVIS_VISUAL_ERROR);
+    } else {
+        display_controller_set(JARVIS_VISUAL_UPDATING);
+        display_controller_set_progress(percent,
+            !strcmp(state, "VERIFYING") ? "VERIFYING" :
+            !strcmp(state, "REBOOTING") ? "RESTARTING" : "UPDATING");
+    }
     cJSON *message = base_message("OTA_STATUS");
     cJSON_AddStringToObject(message, "state", state);
     cJSON_AddNumberToObject(message, "percent", percent);
@@ -308,6 +333,7 @@ static void capture_task(void *unused) {
         return;
     }
 
+    display_controller_set(JARVIS_VISUAL_LISTENING);
     cJSON *begin = base_message("MIC_BEGIN");
     cJSON_AddNumberToObject(begin, "streamId", capture_stream_id);
     cJSON_AddNumberToObject(begin, "sampleRate", AUDIO_SAMPLE_RATE_HZ);
@@ -356,6 +382,7 @@ static void capture_task(void *unused) {
     if (capture_stop_requested) reason = "stopped";
 
     audio_input_end();
+    display_controller_set(online ? JARVIS_VISUAL_IDLE : JARVIS_VISUAL_OFFLINE);
     cJSON *end = base_message("MIC_END");
     cJSON_AddNumberToObject(end, "streamId", capture_stream_id);
     cJSON_AddNumberToObject(end, "totalChunks", sequence);
@@ -383,6 +410,7 @@ static void process_control(const char *data, int length) {
         audio_output_set_manual_test_enabled(true);
         bringup_display_status4("JARVIS", "WI-FI: OK", "JARVIS: ONLINE", FIRMWARE_VERSION);
         ESP_LOGI(TAG, "authenticated local connection ONLINE");
+        display_controller_set(JARVIS_VISUAL_IDLE);
         send_status();
         if (ota_update_pending_verify()) {
             ESP_LOGW(TAG, "running a freshly installed image; starting health window");
@@ -458,6 +486,24 @@ static void process_control(const char *data, int length) {
                 ESP_LOGE(TAG, "LISTEN_START failed: no memory for capture task");
             }
         }
+    } else if (!strcmp(type->valuestring, "TERMINAL_STATE")) {
+        /* Jarvis is authoritative about what the terminal is doing; the device
+         * renders that rather than inferring it, so the screen cannot disagree
+         * with the speaker or the connection. */
+        cJSON *visual = cJSON_GetObjectItemCaseSensitive(root, "visual");
+        if (cJSON_IsString(visual)) {
+            const char *v = visual->valuestring;
+            if (!strcmp(v, "IDLE")) display_controller_set(JARVIS_VISUAL_IDLE);
+            else if (!strcmp(v, "VISITOR")) display_controller_set(JARVIS_VISUAL_VISITOR);
+            else if (!strcmp(v, "LISTENING")) display_controller_set(JARVIS_VISUAL_LISTENING);
+            else if (!strcmp(v, "PROCESSING")) display_controller_set(JARVIS_VISUAL_PROCESSING);
+            else if (!strcmp(v, "SPEAKING")) display_controller_set(JARVIS_VISUAL_SPEAKING);
+            else if (!strcmp(v, "OFFLINE")) display_controller_set(JARVIS_VISUAL_OFFLINE);
+            else if (!strcmp(v, "CONNECTING")) display_controller_set(JARVIS_VISUAL_CONNECTING);
+            else if (!strcmp(v, "ERROR")) display_controller_set(JARVIS_VISUAL_ERROR);
+            /* UPDATING is driven locally by OTA progress, which is finer
+             * grained than anything the host can push. */
+        }
     } else if (!strcmp(type->valuestring, "LISTEN_STOP")) {
         capture_stop_requested = true;
     } else if (!strcmp(type->valuestring, "OTA_OFFER")) {
@@ -485,6 +531,7 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
     esp_websocket_event_data_t *event = data;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         online = false;
+        display_controller_set(JARVIS_VISUAL_CONNECTING);
         audio_playback_abort("reconnected");
         active_stream_id = 0;
         audio_frame_filled = 0;
@@ -509,6 +556,7 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
         active_stream_id = 0;
         audio_frame_filled = 0;
         online = false;
+        display_controller_set(JARVIS_VISUAL_OFFLINE);
         bringup_display_status("JARVIS", "WI-FI: OK", "JARVIS: OFFLINE");
         if (reconnect_task_handle) xTaskNotifyGive(reconnect_task_handle);
     }

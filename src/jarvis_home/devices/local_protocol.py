@@ -136,6 +136,10 @@ class LocalDeviceHub:
         self.on_button_pressed = None
         # OTA is owner-initiated only; nothing here starts an update by itself.
         self.ota = OtaStatus()
+        # Whether a visitor session is open. The terminal state machine does
+        # not model this, but the display distinguishes waking for a visitor
+        # from plain idle.
+        self.visitor_present = False
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -205,6 +209,7 @@ class LocalDeviceHub:
         # is done here rather than by the caller so playback can never run with
         # the microphone still open.
         self.terminal.transition(TerminalState.SPEAKING)
+        await self.sync_visual()
         stream = OutboundAudioStream(stream_id, expected_bytes=len(pcm))
         self._audio_active = True
         started = time.monotonic()
@@ -243,6 +248,7 @@ class LocalDeviceHub:
             # Leaving SPEAKING starts the settling delay before the microphone
             # may reopen, on the success and the failure path alike.
             self.terminal.transition(TerminalState.IDLE)
+            await self.sync_visual()
         return {
             **summary,
             "durationSeconds": round(duration_seconds(len(pcm)), 3),
@@ -304,6 +310,7 @@ class LocalDeviceHub:
         self._mic_stream_id = stream_id
         self._mic_reason = None
         self._mic_done = asyncio.Event()
+        await self.sync_visual()
         await self.send("LISTEN_START", streamId=stream_id,
                         maxMilliseconds=max_milliseconds)
         try:
@@ -328,6 +335,47 @@ class LocalDeviceHub:
         await self.websocket.send_text(
             json.dumps(message(message_type, **payload), separators=(",", ":"))
         )
+
+    def visual_for_state(self) -> str:
+        """Maps the authoritative terminal state to a display state.
+
+        The device renders what Jarvis has decided rather than inferring it,
+        so the screen cannot disagree with the speaker or the connection.
+        """
+        state = self.terminal.state
+        if self.ota.is_active():
+            return "UPDATING"
+        if state is TerminalState.OFFLINE:
+            return "OFFLINE"
+        if state is TerminalState.ERROR:
+            return "ERROR"
+        if state is TerminalState.SPEAKING:
+            return "SPEAKING"
+        if state is TerminalState.LISTENING:
+            return "LISTENING"
+        if state is TerminalState.PROCESSING:
+            return "PROCESSING"
+        if state in (TerminalState.BOOTING, TerminalState.SETUP):
+            return "CONNECTING"
+        return "VISITOR" if self.visitor_present else "IDLE"
+
+    async def sync_visual(self) -> None:
+        """Pushes the current display state to the device.
+
+        Best effort: a display update must never break audio or the
+        connection, so send failures are swallowed.
+        """
+        if self.websocket is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.send("TERMINAL_STATE", visual=self.visual_for_state())
+
+    async def set_visitor_present(self, present: bool) -> None:
+        if self.visitor_present == present:
+            return
+        self.visitor_present = present
+        self.arc.set_visitor_present(present)
+        await self.sync_visual()
 
     async def offer_update(self, record: dict, force: bool = False) -> dict:
         """Offer a published release to the device.

@@ -330,6 +330,19 @@ async def firmware_update(request: Request):
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@app.post("/internal/visitor")
+async def visitor_presence(request: Request):
+    """Marks a visitor session open or closed, for the display only.
+
+    Purely visual. Greeting and session deduplication remain owned by the
+    front-door state machine; nothing here can cause Jarvis to speak.
+    """
+    _authorize_loopback_admin(request)
+    payload = await request.json() if await request.body() else {}
+    await hub.set_visitor_present(bool(payload.get("present", False)))
+    return {"visitorPresent": hub.visitor_present, "visual": hub.visual_for_state()}
+
+
 @app.websocket("/ws/device")
 async def device_gateway(websocket: WebSocket):
     client_ip = websocket.client.host if websocket.client else "unknown"

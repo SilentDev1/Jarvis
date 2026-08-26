@@ -10,6 +10,8 @@
 #include "es8311_codec.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "display_render.h"
+#include "display_controller.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -94,6 +96,33 @@ static void lcd_text(const char *text, int x, int y, int scale, uint16_t color) 
     }
 }
 
+/* Pushes the renderer's framebuffer to the panel.
+ *
+ * The framebuffer is host-order RGB565 while the ST7735 expects big-endian, so
+ * bytes are swapped on the way out. Swapping through a small scratch buffer
+ * costs 4 KB and sixteen transfers a frame, rather than a second full-size
+ * buffer or a per-line transaction for every one of 128 rows. */
+#define FLUSH_CHUNK_PIXELS 2048
+static uint16_t flush_scratch[FLUSH_CHUNK_PIXELS];
+
+static void lcd_flush(const uint16_t *framebuffer) {
+    if (!lcd || !framebuffer) return;
+    lcd_window(0, 0, DISPLAY_W - 1, DISPLAY_H - 1);
+    const int total = DISPLAY_W * DISPLAY_H;
+    for (int offset = 0; offset < total; offset += FLUSH_CHUNK_PIXELS) {
+        int count = total - offset;
+        if (count > FLUSH_CHUNK_PIXELS) count = FLUSH_CHUNK_PIXELS;
+        for (int i = 0; i < count; ++i) {
+            flush_scratch[i] = __builtin_bswap16(framebuffer[offset + i]);
+        }
+        spi_transaction_t tx = {
+            .length = (size_t)count * 16,
+            .tx_buffer = flush_scratch,
+        };
+        if (spi_device_polling_transmit(lcd, &tx) != ESP_OK) return;
+    }
+}
+
 esp_err_t bringup_display_init(void) {
     spi_bus_config_t bus = {
         .mosi_io_num = AIPI_LCD_MOSI, .miso_io_num = -1, .sclk_io_num = AIPI_LCD_SCLK,
@@ -126,11 +155,16 @@ esp_err_t bringup_display_init(void) {
     vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level(AIPI_LCD_BACKLIGHT, 1);
     lcd_fill(0x0000);
+    display_set_flush(lcd_flush);
     return ESP_OK;
 }
 
 void bringup_display_status(const char *line1, const char *line2, const char *line3) {
     if (!lcd) return;
+    /* Once the animated interface owns the panel, the legacy text screens are
+     * suppressed: two writers would tear against each other. Their content is
+     * still visible in the serial log. */
+    if (display_controller_active()) return;
     lcd_fill(0x0000);
     lcd_text(line1, 7, 12, 2, 0xffff);
     lcd_text(line2, 7, 58, 1, 0x07ff);
@@ -140,6 +174,7 @@ void bringup_display_status(const char *line1, const char *line2, const char *li
 void bringup_display_status4(const char *line1, const char *line2, const char *line3,
                              const char *line4) {
     if (!lcd) return;
+    if (display_controller_active()) return;
     lcd_fill(0x0000);
     lcd_text(line1, 7, 8, 2, 0xffff);
     lcd_text(line2, 7, 48, 1, 0x07ff);

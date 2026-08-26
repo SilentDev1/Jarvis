@@ -1,5 +1,6 @@
 #include "aipi_board.h"
 #include "bringup.h"
+#include "display_controller.h"
 #include "audio_output.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -39,6 +40,11 @@ void app_main(void) {
     ESP_LOGI(TAG, "PSRAM total=%u free=%u", heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     ESP_LOGI(TAG, "GPIO10 power latch asserted HIGH (battery rails held)");
+    /* Best effort. If the interface cannot start the device still runs and
+     * falls back to the plain text screens. */
+    if (display_controller_start() == ESP_OK) {
+        display_controller_set(JARVIS_VISUAL_BOOT);
+    }
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "initializing custom NVS partition; factory NVS at 0x9000 is untouched");

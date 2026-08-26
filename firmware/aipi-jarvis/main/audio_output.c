@@ -6,6 +6,7 @@
 #include "aipi_board.h"
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
+#include "display_controller.h"
 #include "es8311_codec.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -120,12 +121,36 @@ static esp_err_t start(void) {
     result = es8311_codec_set_muted(false);
     if (result != ESP_OK) goto fail;
     playing = true;
+    display_controller_set(JARVIS_VISUAL_SPEAKING);
     return ESP_OK;
 fail:
     amplifier_set(false);
     i2s_channel_disable(tx_channel);
     xSemaphoreGive(playback_lock);
     return result;
+}
+
+/* Smoothed 0-100 envelope of what is being played, for the display.
+ *
+ * Every 8th sample is enough to track speech at this frame rate, and the work
+ * is a handful of comparisons per chunk. Attack is faster than release so the
+ * core snaps to speech onsets but does not stutter between syllables. */
+static int display_envelope;
+
+static void feed_display_envelope(const int16_t *samples, size_t count) {
+    if (!count) return;
+    int peak = 0;
+    for (size_t i = 0; i < count; i += 8) {
+        int value = samples[i];
+        if (value < 0) value = -value;
+        if (value > peak) peak = value;
+    }
+    int target = peak * 100 / 32767;
+    if (target > 100) target = 100;
+    /* Attack 50%, release 12% per chunk. */
+    int step = target > display_envelope ? 2 : 8;
+    display_envelope += (target - display_envelope) / step;
+    display_controller_set_level(display_envelope);
 }
 
 static esp_err_t write_mono(const int16_t *samples, size_t count) {
@@ -136,6 +161,7 @@ static esp_err_t write_mono(const int16_t *samples, size_t count) {
         stereo[i * 2] = samples[i];
         stereo[i * 2 + 1] = samples[i];
     }
+    feed_display_envelope(samples, count);
     size_t written = 0;
     size_t requested = count * 2 * sizeof(int16_t);
     ESP_RETURN_ON_ERROR(i2s_channel_write(tx_channel, stereo, requested, &written,
@@ -145,6 +171,11 @@ static esp_err_t write_mono(const int16_t *samples, size_t count) {
 
 static void stop(void) {
     if (!playing) return;
+    /* Hand the visual back on every stop path, including aborts, so a failed
+     * utterance cannot leave the core stuck in the speaking animation. */
+    display_envelope = 0;
+    display_controller_set_level(0);
+    display_controller_set(JARVIS_VISUAL_IDLE);
     es8311_codec_set_muted(true);
     vTaskDelay(pdMS_TO_TICKS(5));
     amplifier_set(false);

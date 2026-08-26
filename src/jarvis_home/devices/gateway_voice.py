@@ -13,6 +13,7 @@ ability to make the house speak.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import httpx
@@ -48,6 +49,15 @@ class AiPiGatewayVoice(VoiceTerminalProvider):
 
     async def set_session(self, session_id: str | None) -> None:
         self.session_id = session_id
+        # Tell the terminal a visitor is present so the display wakes before
+        # Jarvis speaks, rather than only once audio starts.
+        with contextlib.suppress(Exception):
+            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT_SECONDS) as client:
+                await client.post(
+                    f"{self.base_url}/internal/visitor",
+                    headers=self._headers,
+                    json={"present": session_id is not None},
+                )
 
     async def speak(self, text: str) -> None:
         async with httpx.AsyncClient(timeout=SPEAK_TIMEOUT_SECONDS) as client:

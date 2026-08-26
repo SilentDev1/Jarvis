@@ -84,6 +84,19 @@ def make_hub(ready=True, socket=None):
 
 
 def types_sent(socket):
+    """Audio protocol messages only.
+
+    Display state sync is orthogonal traffic and interleaves freely; including
+    it here would make the audio ordering assertions brittle for no benefit.
+    """
+    return [
+        json.loads(item)["type"]
+        for item in socket.text
+        if json.loads(item)["type"] != "TERMINAL_STATE"
+    ]
+
+
+def all_types_sent(socket):
     return [json.loads(item)["type"] for item in socket.text]
 
 
@@ -248,3 +261,52 @@ async def test_listen_waits_out_the_settle_delay_instead_of_failing():
     asyncio.create_task(finish())
     await hub.listen(max_milliseconds=500)
     assert hub.terminal.microphone_allowed() is True
+
+
+@pytest.mark.asyncio
+async def test_display_state_is_pushed_around_playback():
+    # The device renders what Jarvis decided rather than inferring it, so the
+    # screen cannot disagree with the speaker.
+    socket = FakeSocket()
+    hub = make_hub(socket=socket)
+    await hub.play_pcm(b"\x01\x02" * 100)
+    assert "TERMINAL_STATE" in all_types_sent(socket)
+    visuals = [
+        json.loads(item)["visual"]
+        for item in socket.text
+        if json.loads(item)["type"] == "TERMINAL_STATE"
+    ]
+    assert "SPEAKING" in visuals
+    assert visuals[-1] == "IDLE"
+
+
+@pytest.mark.asyncio
+async def test_visitor_presence_changes_the_display_state():
+    hub = make_hub()
+    assert hub.visual_for_state() == "IDLE"
+    await hub.set_visitor_present(True)
+    assert hub.visual_for_state() == "VISITOR"
+    await hub.set_visitor_present(False)
+    assert hub.visual_for_state() == "IDLE"
+
+
+@pytest.mark.asyncio
+async def test_an_update_in_progress_outranks_other_display_states():
+    # A half-flashed device showing IDLE would be actively misleading.
+    hub = make_hub()
+    hub.ota.begin("9.9.9", "0.0.0")
+    assert hub.visual_for_state() == "UPDATING"
+
+
+@pytest.mark.asyncio
+async def test_display_sync_failure_never_breaks_audio():
+    class Broken(FakeSocket):
+        async def send_text(self, value):
+            if json.loads(value)["type"] == "TERMINAL_STATE":
+                raise ConnectionResetError("display sync failed")
+            await super().send_text(value)
+
+    hub = make_hub(socket=Broken())
+    # Playback must still complete even though every display push fails.
+    result = await hub.play_pcm(b"\x01\x02" * 100)
+    assert result["totalBytes"] == 200
