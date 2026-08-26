@@ -6,6 +6,7 @@
 
 #include "aipi_board.h"
 #include "audio_output.h"
+#include "local_connection.h"
 #include "es8311_codec.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -157,11 +158,18 @@ static void button_task(void *unused) {
             stable = sample; count = 0;
             if (stable != prior) {
                 ESP_LOGI(TAG, "%s", stable ? "BUTTON_UP" : "BUTTON_DOWN");
-                if (!stable && audio_output_manual_test_enabled()) {
-                    esp_err_t result = audio_output_test_tone();
-                    if (result != ESP_OK) {
-                        ESP_LOGE(TAG, "speaker test failed safely: %s", esp_err_to_name(result));
-                        bringup_display_status("JARVIS", "ONLINE", "AUDIO: ERROR");
+                if (!stable) {
+                    /* Online, the press starts a voice turn on Jarvis. Offline,
+                     * it falls back to the local speaker self-test so the
+                     * button still proves the audio path with no network. */
+                    if (!local_connection_button_pressed() &&
+                        audio_output_manual_test_enabled()) {
+                        esp_err_t result = audio_output_test_tone();
+                        if (result != ESP_OK) {
+                            ESP_LOGE(TAG, "speaker test failed safely: %s",
+                                     esp_err_to_name(result));
+                            bringup_display_status("JARVIS", "ONLINE", "AUDIO: ERROR");
+                        }
                     }
                 }
                 prior = stable;

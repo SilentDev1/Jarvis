@@ -19,6 +19,7 @@ from ..core.speech_input import (
     rms,
     voiced_fraction,
 )
+from ..integrations.providers import OllamaAI
 from ..persistence import Store
 from .audio_stream import (
     AUDIO_MAX_BINARY_FRAME_BYTES,
@@ -37,6 +38,7 @@ from .local_protocol import (
     parse_message,
 )
 from .terminal_state import TerminalState
+from .voice_loop import VoiceLoop
 
 cfg = get_settings()
 store = Store(cfg.data_dir / "jarvis.db")
@@ -49,6 +51,10 @@ logger = logging.getLogger("jarvis_home.device_gateway")
 # filter's echo memory must persist across turns to catch Jarvis hearing itself.
 stt = FasterWhisperSTT()
 utterance_filter = UtteranceFilter()
+# Local reasoning by default. A door terminal must keep working when no model
+# is reachable, so the loop answers basic status questions itself.
+ai = OllamaAI(cfg.ollama_url, cfg.ollama_model)
+voice_loop = VoiceLoop(hub, stt, MacSayTTS(), utterance_filter, ai=ai)
 
 
 def peak_level(pcm: bytes) -> int:
@@ -81,8 +87,20 @@ async def heartbeat_loop():
             logger.exception("Local device heartbeat failed")
 
 
+async def _button_voice_turn():
+    """A physical press starts one voice turn. Failures are logged, never raised
+    into the device receive loop."""
+    try:
+        turn = await voice_loop.run_turn()
+        logger.info("button voice turn: accepted=%s reason=%s",
+                    turn.accepted, turn.reason)
+    except Exception:
+        logger.exception("button voice turn failed")
+
+
 @asynccontextmanager
 async def lifespan(_app):
+    hub.on_button_pressed = _button_voice_turn
     hub.mark_offline()
     task = asyncio.create_task(heartbeat_loop())
     yield
@@ -214,6 +232,21 @@ async def listen(request: Request):
         "transcript": decision.transcript if decision.accepted else "",
         "rawTranscript": text,
     }
+
+
+@app.post("/internal/voice-turn")
+async def voice_turn(request: Request):
+    """Run one complete voice turn: listen, recognise, answer, speak."""
+    _authorize_loopback_admin(request)
+    payload = await request.json() if await request.body() else {}
+    milliseconds = int(payload.get("milliseconds", 6000))
+    if not 500 <= milliseconds <= 15000:
+        raise HTTPException(status_code=400, detail="out_of_range")
+    try:
+        turn = await voice_loop.run_turn(listen_milliseconds=milliseconds)
+    except AudioStreamError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return turn.public()
 
 
 @app.websocket("/ws/device")

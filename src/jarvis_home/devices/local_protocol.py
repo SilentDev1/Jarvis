@@ -129,6 +129,9 @@ class LocalDeviceHub:
         # Signalled when the device reports playback actually finished. The
         # host finishes sending long before the device finishes playing.
         self._playback_done: asyncio.Event | None = None
+        # Set by the gateway so a physical button press can start a voice turn
+        # without the protocol layer depending on the voice loop.
+        self.on_button_pressed = None
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -324,6 +327,12 @@ class LocalDeviceHub:
 
     def _handle_microphone_message(self, value: dict) -> bool:
         kind = value.get("type")
+        if kind == "BUTTON_PRESSED":
+            if self.on_button_pressed is not None:
+                # Run detached: the turn takes seconds and must not block the
+                # receive loop that the same device depends on.
+                asyncio.create_task(self.on_button_pressed())
+            return True
         if kind == "AUDIO_DONE":
             if self._playback_done is not None:
                 self._playback_done.set()
