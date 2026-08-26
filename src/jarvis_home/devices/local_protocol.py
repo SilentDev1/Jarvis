@@ -5,6 +5,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 
 from ..persistence import Device, utcnow
 from .arc_reactor import ArcReactorController
@@ -121,6 +122,9 @@ class LocalDeviceHub:
         # Consumes the terminal state and the outgoing audio envelope. Disabled
         # until the physical light is identified.
         self.arc = ArcReactorController()
+        # Owner light preference, owned by the host so it survives a device
+        # reboot and can be re-pushed on reconnect.
+        self.arc_settings = None
         # In-flight microphone stream. Bounded: capture is capped by duration
         # on the device and by byte count here, so a wedged or hostile device
         # cannot grow host memory.
@@ -142,6 +146,11 @@ class LocalDeviceHub:
         # not model this, but the display distinguishes waking for a visitor
         # from plain idle.
         self.visitor_present = False
+        # Monotonic revision for state pushes. Without it a delayed packet can
+        # revert the terminal: SPEAKING at revision 103 followed by a late
+        # PROCESSING at 102 would put the device back to thinking.
+        self._state_revision = 0
+        self._last_visual: str | None = None
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -361,16 +370,44 @@ class LocalDeviceHub:
             return "CONNECTING"
         return "VISITOR" if self.visitor_present else "IDLE"
 
-    async def sync_visual(self) -> None:
+    async def sync_visual(self, force: bool = False) -> None:
         """Pushes the current display state to the device.
+
+        Only on a real transition, or when forced for a resync. Repeating the
+        same state every time something incidental happens would be pure noise
+        on a link that also carries audio.
 
         Best effort: a display update must never break audio or the
         connection, so send failures are swallowed.
         """
         if self.websocket is None:
             return
+        visual = self.visual_for_state()
+        if not force and visual == self._last_visual:
+            return
+        self._state_revision += 1
+        self._last_visual = visual
         with contextlib.suppress(Exception):
-            await self.send("TERMINAL_STATE", visual=self.visual_for_state())
+            await self.send(
+                "TERMINAL_STATE",
+                visual=visual,
+                revision=self._state_revision,
+                timestamp=round(time.time(), 3),
+            )
+
+    async def push_arc_settings(self) -> None:
+        """Re-sends the owner's light preference.
+
+        The device forgets it across a reboot and defaults to off, so an owner
+        who asked for the light on would otherwise silently lose it after an
+        OTA or a power cycle. Equally, an owner who turned it off must not have
+        it come back on by itself.
+        """
+        if self.websocket is None or self.arc_settings is None:
+            return
+        hour = datetime.now(UTC).astimezone().hour
+        with contextlib.suppress(Exception):
+            await self.send("ARC_SETTINGS", **self.arc_settings.device_message(hour))
 
     async def set_visitor_present(self, present: bool) -> None:
         if self.visitor_present == present:
@@ -492,6 +529,11 @@ class LocalDeviceHub:
             self._persist(True)
             await self.send("DEVICE_READY", deviceId=self.health.device_id)
             await self.send("STATUS_REQUEST")
+            # The device has just reconnected and knows nothing about the
+            # current semantic state, so push it unconditionally.
+            self._last_visual = None
+            await self.sync_visual(force=True)
+            await self.push_arc_settings()
         elif message_type == "PONG":
             self.health.last_successful_heartbeat = now
         elif message_type == "PING":

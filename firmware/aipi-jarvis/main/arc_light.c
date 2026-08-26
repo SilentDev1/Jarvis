@@ -73,20 +73,27 @@ static int brightness_for(jarvis_visual_t visual, uint32_t frame) {
     int active = clamp(active_brightness, 0, ARC_MAX_BRIGHTNESS);
     int level = clamp(audio_level, 0, 100);
 
+    /* Each state occupies a band between the owner's idle and active
+     * settings, so raising or lowering brightness scales the whole scheme
+     * rather than flattening the differences between states. */
     switch (visual) {
     case JARVIS_VISUAL_IDLE:
-        return wave(frame, 120, idle, idle + (active - idle) / 6);
+        /* Calm and clearly the quietest state. */
+        return wave(frame, 120, idle, idle + (active - idle) / 8);
     case JARVIS_VISUAL_VISITOR:
-        return wave(frame, 40, idle + (active - idle) / 3, active);
+        /* Wakes noticeably: this is the terminal noticing someone. */
+        return wave(frame, 40, idle + (active - idle) / 2, active * 4 / 5);
     case JARVIS_VISUAL_LISTENING:
         /* Breathing floor with the input level layered on top. */
-        return clamp(wave(frame, 60, idle, active * 2 / 3) + level * active / 300,
+        return clamp(wave(frame, 60, idle + (active - idle) / 4, active * 3 / 5)
+                     + level * active / 400,
                      0, ARC_MAX_BRIGHTNESS);
     case JARVIS_VISUAL_PROCESSING:
-        return wave(frame, 24, idle, active);
+        /* Faster than listening, dimmer than speech: visibly working. */
+        return wave(frame, 24, idle + (active - idle) / 3, active * 3 / 4);
     case JARVIS_VISUAL_SPEAKING:
-        /* Audio reactive: a floor so it never goes dark mid-sentence, plus the
-         * envelope. */
+        /* Audio reactive across the widest band, with a floor so it never goes
+         * dark mid-sentence. */
         return clamp(idle + (active - idle) * level / 100, 0, ARC_MAX_BRIGHTNESS);
     case JARVIS_VISUAL_CONNECTING:
         return wave(frame, 80, idle / 2, active / 2);

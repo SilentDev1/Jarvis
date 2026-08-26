@@ -30,8 +30,8 @@ typedef enum {
 /* Brightness percentages are of full scale and are clamped. The defaults are
  * deliberately modest: this sits at a front door, and a WS2812 at full white
  * is both unpleasant to look at and the peak of its current draw. */
-#define ARC_DEFAULT_IDLE_BRIGHTNESS 12
-#define ARC_DEFAULT_ACTIVE_BRIGHTNESS 45
+#define ARC_DEFAULT_IDLE_BRIGHTNESS 6
+#define ARC_DEFAULT_ACTIVE_BRIGHTNESS 55
 #define ARC_MAX_BRIGHTNESS 80
 #define ARC_QUIET_SCALE_PERCENT 25
 

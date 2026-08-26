@@ -218,6 +218,7 @@ static void button_task(void *unused) {
          * rather than spawning another one. Without a caller the watchdog is
          * dead code and a wedged sender could hold the amplifier open. */
         audio_playback_poll_timeout();
+        local_connection_poll_state_expiry();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

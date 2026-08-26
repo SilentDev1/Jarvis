@@ -13,3 +13,7 @@ bool local_connection_button_pressed(void);
 /* The single source of truth for the firmware version string, so log banners
  * cannot drift from what the device reports to Jarvis. */
 const char *local_connection_firmware_version(void);
+
+/* Expires a stale host-owned presentation state. Safe to call when no host
+ * state is active. Driven from an existing periodic task. */
+void local_connection_poll_state_expiry(void);

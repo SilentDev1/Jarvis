@@ -16,6 +16,7 @@ data/models/
 # Firmware store: built binaries are build artifacts, not source. The signed
 # manifests are reproducible from a build plus the signing key.
 data/firmware/
+data/arc_light.json
 data/faces/
 *.pt
 logs/*

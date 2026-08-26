@@ -24,11 +24,7 @@ from ..core.speech_input import (
 )
 from ..integrations.providers import OllamaAI
 from ..persistence import Store
-from .arc_reactor import (
-    DEFAULT_ACTIVE_BRIGHTNESS,
-    DEFAULT_IDLE_BRIGHTNESS,
-    ArcLightSettings,
-)
+from .arc_reactor import ArcLightSettings, ArcLightStore
 from .audio_stream import (
     AUDIO_MAX_BINARY_FRAME_BYTES,
     AUDIO_MAX_STREAM_SECONDS,
@@ -73,6 +69,9 @@ logger = logging.getLogger("jarvis_home.device_gateway")
 # One shared recogniser and filter: the model costs seconds to load and the
 # filter's echo memory must persist across turns to catch Jarvis hearing itself.
 firmware_store = FirmwareStore(cfg.data_dir / "firmware")
+# Owner light preference, loaded at startup so an explicit "off" survives a
+# gateway restart rather than quietly coming back on.
+arc_store = ArcLightStore(cfg.data_dir / "arc_light.json")
 stt = FasterWhisperSTT()
 utterance_filter = UtteranceFilter()
 # Local reasoning by default. A door terminal must keep working when no model
@@ -127,6 +126,8 @@ async def _button_voice_turn():
 @asynccontextmanager
 async def lifespan(_app):
     hub.on_button_pressed = _button_voice_turn
+    hub.arc_settings = arc_store.load()
+    logger.info("arc light preference loaded: enabled=%s", hub.arc_settings.enabled)
     hub.mark_offline()
     task = asyncio.create_task(heartbeat_loop())
     # Broadcast discovery, so the terminal can find Jarvis without multicast.
@@ -366,13 +367,21 @@ async def arc_light_settings(request: Request):
     """
     _authorize_loopback_admin(request)
     payload = await request.json() if await request.body() else {}
+    # Start from the stored preference so a partial request (for example just
+    # {"enabled": false}) does not silently reset brightness to defaults.
+    current = hub.arc_settings or arc_store.load()
     settings = ArcLightSettings(
-        enabled=bool(payload.get("enabled", False)),
-        idle_brightness=int(payload.get("idleBrightness", DEFAULT_IDLE_BRIGHTNESS)),
-        active_brightness=int(payload.get("activeBrightness", DEFAULT_ACTIVE_BRIGHTNESS)),
-        quiet_hours_start=int(payload.get("quietHoursStart", 22)),
-        quiet_hours_end=int(payload.get("quietHoursEnd", 7)),
+        enabled=bool(payload.get("enabled", current.enabled)),
+        idle_brightness=int(payload.get("idleBrightness", current.idle_brightness)),
+        active_brightness=int(
+            payload.get("activeBrightness", current.active_brightness)
+        ),
+        audio_reactive=bool(payload.get("audioReactive", current.audio_reactive)),
+        quiet_hours_start=int(payload.get("quietHoursStart", current.quiet_hours_start)),
+        quiet_hours_end=int(payload.get("quietHoursEnd", current.quiet_hours_end)),
     )
+    hub.arc_settings = settings
+    arc_store.save(settings)
     # Quiet hours are a wall-clock policy, so local time is what the owner
     # means; the timezone is made explicit rather than left naive.
     hour = (int(payload["hour"]) if "hour" in payload

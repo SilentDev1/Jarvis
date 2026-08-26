@@ -161,3 +161,41 @@ def test_control_script_never_requires_handling_a_token_by_hand():
     assert "$1" not in script.split("post()")[1].split("}")[0].replace('-d "$1"', "")
     for verb in ("off", "dim", "on", "bright", "status"):
         assert f"  {verb})" in script or f"{verb})" in script
+
+
+def test_arc_states_occupy_distinct_brightness_bands():
+    # Raising or lowering the owner's brightness must scale the whole scheme
+    # rather than flattening the differences between states.
+    source = read("arc_light.c")
+    body = source.split("static int brightness_for(", 1)[1].split("\n}", 1)[0]
+    for state in ("IDLE", "VISITOR", "LISTENING", "PROCESSING", "SPEAKING"):
+        assert f"JARVIS_VISUAL_{state}" in body
+    # Every band is expressed relative to idle and active, not hardcoded.
+    assert body.count("active - idle") >= 4
+
+
+def test_display_does_not_depend_on_the_arc_light():
+    # Two independent renderers of one state: the screen must work whether or
+    # not a light exists or is enabled.
+    controller = read("display_controller.c")
+    render = controller.split("static void render_frame(", 1)[1].split("\n}", 1)[0]
+    assert "arc_light" not in render
+    assert "arc_light_enabled" not in render
+
+
+def test_arc_light_does_not_depend_on_the_display_renderer():
+    light = read("arc_light.c")
+    for coupling in ("display_render", "framebuffer", "display_present"):
+        assert coupling not in light
+
+
+def test_disabled_light_still_tracks_state_without_illuminating():
+    # State must keep flowing so re-enabling is instant and correct, but a
+    # disabled light must emit nothing.
+    light = read("arc_light.c")
+    apply_body = light.split("static void apply(", 1)[1].split("\n}", 1)[0]
+    assert "if (!enabled)" in apply_body
+    assert "led_strip_clear(strip)" in apply_body
+    # The state setter is unconditional.
+    setter = light.split("void arc_light_set_state(", 1)[1].split("\n", 1)[0]
+    assert "state = visual" in setter

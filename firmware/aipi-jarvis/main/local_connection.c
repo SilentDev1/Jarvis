@@ -25,7 +25,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "1.2.1-arc-light"
+#define FIRMWARE_VERSION "1.3.0-auto-visual"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -45,6 +45,14 @@ static TaskHandle_t capture_task_handle;
 static volatile bool capture_stop_requested;
 static uint16_t capture_stream_id;
 static uint32_t capture_max_ms;
+/* Highest state revision seen. A delayed packet must not revert the terminal:
+ * SPEAKING at revision 103 followed by a late PROCESSING at 102 would put the
+ * device back to thinking. */
+static uint32_t last_state_revision;
+/* When the host last told us what it is doing. Host-owned states must not
+ * persist forever if the host stops talking without the socket closing. */
+static TickType_t last_state_tick;
+static bool host_state_active;
 static TaskHandle_t reconnect_task_handle;
 
 const char *local_connection_firmware_version(void) {
@@ -497,8 +505,24 @@ static void process_control(const char *data, int length) {
          * renders that rather than inferring it, so the screen cannot disagree
          * with the speaker or the connection. */
         cJSON *visual = cJSON_GetObjectItemCaseSensitive(root, "visual");
+        cJSON *revision = cJSON_GetObjectItemCaseSensitive(root, "revision");
+        if (cJSON_IsNumber(revision)) {
+            uint32_t value = (uint32_t)revision->valuedouble;
+            if (value <= last_state_revision && last_state_revision != 0) {
+                ESP_LOGW(TAG, "ignoring stale state revision %lu (have %lu)",
+                         (unsigned long)value, (unsigned long)last_state_revision);
+                cJSON_Delete(root);
+                return;
+            }
+            last_state_revision = value;
+        }
         if (cJSON_IsString(visual)) {
             const char *v = visual->valuestring;
+            last_state_tick = xTaskGetTickCount();
+            /* Only these are owned by the host and therefore expirable; the
+             * device owns its own boot, offline and error presentation. */
+            host_state_active = !strcmp(v, "VISITOR") || !strcmp(v, "LISTENING") ||
+                                !strcmp(v, "PROCESSING") || !strcmp(v, "SPEAKING");
             if (!strcmp(v, "IDLE")) display_controller_set(JARVIS_VISUAL_IDLE);
             else if (!strcmp(v, "VISITOR")) display_controller_set(JARVIS_VISUAL_VISITOR);
             else if (!strcmp(v, "LISTENING")) display_controller_set(JARVIS_VISUAL_LISTENING);
@@ -554,6 +578,10 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
     esp_websocket_event_data_t *event = data;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         online = false;
+        /* A reconnecting host restarts its numbering, so forget the old
+         * high-water mark or every new state would look stale. */
+        last_state_revision = 0;
+        host_state_active = false;
         display_controller_set(JARVIS_VISUAL_CONNECTING);
         audio_playback_abort("reconnected");
         active_stream_id = 0;
@@ -583,6 +611,24 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
         bringup_display_status("JARVIS", "WI-FI: OK", "JARVIS: OFFLINE");
         if (reconnect_task_handle) xTaskNotifyGive(reconnect_task_handle);
     }
+}
+
+/* Expires a host-owned state that has gone stale.
+ *
+ * The heartbeat closes a dead socket, but a host that wedges mid-utterance can
+ * leave the socket open and the terminal stuck showing SPEAKING forever. After
+ * this long with no update, presentation falls back to idle. */
+#define HOST_STATE_TIMEOUT_MS 120000
+
+void local_connection_poll_state_expiry(void) {
+    if (!host_state_active) return;
+    if ((xTaskGetTickCount() - last_state_tick) < pdMS_TO_TICKS(HOST_STATE_TIMEOUT_MS)) {
+        return;
+    }
+    ESP_LOGW(TAG, "host state stale for %ds; returning to idle",
+             HOST_STATE_TIMEOUT_MS / 1000);
+    host_state_active = false;
+    display_controller_set(online ? JARVIS_VISUAL_IDLE : JARVIS_VISUAL_OFFLINE);
 }
 
 bool local_connection_button_pressed(void) {

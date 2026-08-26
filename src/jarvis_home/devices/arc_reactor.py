@@ -19,10 +19,12 @@ physically validated; nothing is worth risking it for a light.
 
 from __future__ import annotations
 
+import json
 import math
 from array import array
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from .terminal_state import TerminalState
 
@@ -69,8 +71,8 @@ FULL_SCALE = 32767.0
 
 # Owner-facing brightness policy. Percentages of full scale, clamped on the
 # device as well so a bad setting cannot drive the light hard.
-DEFAULT_IDLE_BRIGHTNESS = 12
-DEFAULT_ACTIVE_BRIGHTNESS = 45
+DEFAULT_IDLE_BRIGHTNESS = 6
+DEFAULT_ACTIVE_BRIGHTNESS = 55
 MAX_BRIGHTNESS = 80
 # Quiet hours dim rather than extinguish: an offline or listening terminal
 # still has something worth indicating at night.
@@ -239,3 +241,48 @@ class ArcLightSettings:
             "activeBrightness": self.active_brightness,
             "quietHours": quiet,
         }
+
+
+class ArcLightStore:
+    """Persists the owner's light preference.
+
+    An owner who turns the light off must not find it back on after a gateway
+    restart, an OTA, or a power cycle. Equally, an owner who asked for it on
+    should not have to ask again. The device deliberately forgets across a
+    reboot and defaults to off, so the host holds the preference and re-pushes
+    it on reconnect.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def load(self) -> ArcLightSettings:
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError):
+            # A missing or corrupt file must not stop the gateway starting;
+            # the safe default is the light off.
+            return ArcLightSettings()
+        if not isinstance(data, dict):
+            return ArcLightSettings()
+        try:
+            return ArcLightSettings(
+                enabled=bool(data.get("enabled", False)),
+                idle_brightness=int(data.get("idle_brightness", DEFAULT_IDLE_BRIGHTNESS)),
+                active_brightness=int(
+                    data.get("active_brightness", DEFAULT_ACTIVE_BRIGHTNESS)
+                ),
+                audio_reactive=bool(data.get("audio_reactive", True)),
+                quiet_hours_start=int(data.get("quiet_hours_start", 22)),
+                quiet_hours_end=int(data.get("quiet_hours_end", 7)),
+            )
+        except (TypeError, ValueError):
+            return ArcLightSettings()
+
+    def save(self, settings: ArcLightSettings) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Write then replace, so a crash mid-write cannot leave a truncated
+        # file that reads back as "light off" on the next start.
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(asdict(settings), indent=2, sort_keys=True))
+        temporary.replace(self.path)

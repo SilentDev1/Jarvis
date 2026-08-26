@@ -133,3 +133,47 @@ the output, so adding that backend does not touch any visitor or session code.
   brightness the output can be very dim.
 - Light is on but does not react: the state comes from Jarvis, so check the
   terminal state in health rather than the light.
+
+
+## Manual override has priority
+
+The owner's preference outranks every automatic state. With the light disabled,
+visitor, speaking and listening states still flow to the device and the display
+animates normally, but the light emits nothing. State keeps tracking while
+disabled so re-enabling is instant and correct rather than waiting for the next
+transition.
+
+| Command | Meaning |
+| --- | --- |
+| `off` | disabled until explicitly changed; automatic states cannot re-light it |
+| `dim` | automatic, low profile (idle 6 / active 20) |
+| `on` | automatic, normal profile (idle 15 / active 55) |
+| `on <idle> <active>` | automatic, custom bounds |
+| `bright` | automatic, high profile (idle 30 / active 75) |
+| `status` | current firmware, availability and enabled state |
+
+A partial request keeps the stored values for anything it omits, so
+`{"enabled": false}` does not silently reset brightness to defaults.
+
+## Persistence
+
+The preference is held by the host in `data/arc_light.json` and re-pushed to
+the device on every reconnect. It therefore survives a gateway restart, a
+Jarvis restart, an OTA and a device power cycle. Verified in practice: the
+light stayed off across a full firmware update.
+
+The device deliberately forgets across a reboot and defaults to off. That is
+the safe direction: a terminal that comes back from a crash should not light
+itself up because it lost track of what the owner wanted.
+
+Writes are atomic. A crash mid-write must not leave a truncated file that reads
+back as "light off" and silently discards the preference. A missing or corrupt
+file falls back to off rather than stopping the gateway.
+
+## Two renderers, one state
+
+The display and the light consume the same authoritative state and are
+otherwise independent. The screen works whether or not a light exists or is
+enabled, and the light works without reference to the framebuffer. Tests pin
+both directions, because coupling them is the easy mistake and would mean a
+missing light could blank the screen.

@@ -164,3 +164,40 @@ def test_pixel_stream_raises_the_data_line_before_sending():
     assert "gpio_set_level(AIPI_LCD_DC, 1)" in flush
     assert flush.index("lcd_window(") < flush.index("gpio_set_level(AIPI_LCD_DC, 1)")
     assert flush.index("gpio_set_level(AIPI_LCD_DC, 1)") < flush.index("spi_device_polling_transmit")
+
+
+def test_device_rejects_stale_state_revisions():
+    # SPEAKING at revision 103 followed by a late PROCESSING at 102 must not
+    # put the terminal back to thinking.
+    connection = read("local_connection.c")
+    window = connection.split('"TERMINAL_STATE"', 1)[1].split("else if", 1)[0]
+    assert "last_state_revision" in window
+    assert "ignoring stale state revision" in window
+    assert "value <= last_state_revision" in window
+
+
+def test_revision_high_water_mark_resets_on_reconnect():
+    # A reconnecting host restarts its numbering; without a reset every new
+    # state would look stale and the terminal would freeze.
+    connection = read("local_connection.c")
+    assert "last_state_revision = 0" in connection
+    assert "forget the old" in connection
+
+
+def test_host_owned_states_expire_if_the_host_goes_quiet():
+    # The heartbeat closes a dead socket, but a host that wedges mid-utterance
+    # can leave the socket open and the terminal stuck showing SPEAKING.
+    connection = read("local_connection.c")
+    assert "HOST_STATE_TIMEOUT_MS" in connection
+    expiry = connection.split("void local_connection_poll_state_expiry(", 1)[1]
+    assert "host_state_active = false" in expiry
+    assert "JARVIS_VISUAL_IDLE" in expiry
+    # Only host-owned states are expirable; the device owns boot and offline.
+    assert '!strcmp(v, "VISITOR")' in connection
+    assert '!strcmp(v, "SPEAKING")' in connection
+
+
+def test_state_expiry_is_actually_driven():
+    # Defining the watchdog is not enough; it needs a caller.
+    bringup = read("bringup.c")
+    assert "local_connection_poll_state_expiry()" in bringup

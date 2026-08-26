@@ -84,7 +84,26 @@ forwarded as ordinary link-layer traffic within a subnet.
 
 Jarvis to device:
 
-- `TERMINAL_STATE` — `visual`, one of IDLE, VISITOR, LISTENING, PROCESSING,
-  SPEAKING, OFFLINE, CONNECTING, ERROR. The device renders what Jarvis decided
-  rather than inferring it. UPDATING is driven locally by OTA progress, which
-  is finer grained than anything the host can push.
+- `TERMINAL_STATE` — `visual`, `revision`, `timestamp`. The device renders
+  what Jarvis decided rather than inferring it. UPDATING is driven locally by
+  OTA progress, which is finer grained than anything the host can push.
+
+  `revision` is monotonic and the device ignores anything at or below the
+  highest it has seen. Without it a delayed packet reverts the terminal:
+  SPEAKING at revision 103 followed by a late PROCESSING at 102 would put the
+  device back to thinking. The high-water mark resets on reconnect, because a
+  reconnecting host restarts its numbering and every new state would otherwise
+  look stale.
+
+  Sent only on a real transition, or forced on reconnect. The link also carries
+  audio, so repeating an unchanged state is pure noise.
+
+  Host-owned states — VISITOR, LISTENING, PROCESSING, SPEAKING — expire on the
+  device after two minutes without an update. The heartbeat closes a dead
+  socket, but a host that wedges mid-utterance can leave the socket open and
+  the terminal stuck showing SPEAKING indefinitely.
+
+- `ARC_SETTINGS` — `enabled`, `idleBrightness`, `activeBrightness`,
+  `quietHours`. Re-sent on reconnect: the device forgets across a reboot and
+  defaults to off, so an owner who asked for the light on would otherwise lose
+  it silently after an OTA.
