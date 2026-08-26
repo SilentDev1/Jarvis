@@ -474,6 +474,10 @@ async def create_visitor_session(sid: str):
         return state
     delivered = await voice_service.begin(sid, greeting)
     if delivered:
+        # begin() has already spoken and listened, so a transcript may be
+        # waiting. Drive the conversation from here rather than leaving it to
+        # the simulator endpoint.
+        asyncio.create_task(visitor_conversation_loop(sid))
         state.turns.append({"role": "assistant", "content": greeting})
         with store.Session() as s:
             s.add(
@@ -1421,15 +1425,22 @@ async def sim_start():
     }
 
 
-@app.post("/api/simulator/{sid}/say", dependencies=[Depends(auth)])
-async def sim_say(sid: str, item: VisitorInput):
+async def handle_visitor_utterance(sid: str, raw_text: str) -> dict | None:
+    """Runs one conversation turn and speaks the reply.
+
+    Shared by the simulator endpoint and by real recognised speech from the
+    terminal, so a spoken visitor and a typed one take exactly the same path
+    through policy, persistence and notification.
+
+    Returns None when the utterance was not worth acting on.
+    """
     state = sessions.get(sid)
     if not state:
-        raise HTTPException(404, "No active visitor session")
-    text = sanitize(item.text)
+        return None
+    text = sanitize(raw_text)
     if not is_meaningful_utterance(text):
         bus.publish("voice.input_ignored", {"reason": "empty_or_noise_only"})
-        return Response(status_code=204)
+        return None
     voice_service.begin_processing(sid)
     state.turns.append({"role": "user", "content": text})
     bus.publish("visitor.spoke", {"session_id": sid, "text": text})
@@ -1484,6 +1495,47 @@ async def sim_say(sid: str, item: VisitorInput):
         "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
         "state": state.public(),
     }
+
+
+@app.post("/api/simulator/{sid}/say", dependencies=[Depends(auth)])
+async def sim_say(sid: str, item: VisitorInput):
+    if sid not in sessions:
+        raise HTTPException(404, "No active visitor session")
+    result = await handle_visitor_utterance(sid, item.text)
+    if result is None:
+        return Response(status_code=204)
+    return result
+
+
+async def visitor_conversation_loop(sid: str) -> None:
+    """Drives a real spoken conversation with a visitor.
+
+    voice_service.begin() and respond() each speak and then listen, so the
+    provider always has a transcript waiting when they return. Nothing was
+    reading it: the terminal greeted, listened, and dropped what it heard,
+    which looked from the doorstep like Jarvis ignoring you.
+
+    Bounded by the voice service's own turn limit and inactivity timeout; this
+    loop only decides whether there is anything worth answering.
+    """
+    for _ in range(cfg.visitor_conversation_max_turns + 1):
+        if sid not in sessions or voice_service.active is None:
+            return
+        if voice_service.active.visitor_session_id != sid:
+            return
+        transcript = voice.last_transcript
+        if not transcript:
+            reason = voice.last_reason or "no_speech"
+            bus.publish("voice.input_ignored",
+                        {"session_id": sid, "reason": reason})
+            await voice_service.end(sid, "no_speech_timeout")
+            return
+        # Clear before answering: respond() listens again and will overwrite
+        # this, and a stale transcript would be answered twice.
+        voice.last_transcript = ""
+        if await handle_visitor_utterance(sid, transcript) is None:
+            await voice_service.end(sid, "nothing_meaningful_heard")
+            return
 
 
 @app.post("/api/simulator/{sid}/end", dependencies=[Depends(auth)])

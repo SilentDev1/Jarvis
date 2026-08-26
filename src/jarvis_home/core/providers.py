@@ -41,6 +41,16 @@ class AIProvider(ABC):
 
 
 class VoiceTerminalProvider(ABC):
+    #: What the terminal last heard, empty when nothing usable was recognised.
+    #:
+    #: Listening is modelled as a state change rather than a call that returns
+    #: speech, so the result has to live somewhere. Declaring it here means a
+    #: caller can read it from any provider instead of reaching for getattr,
+    #: and a provider that never listens simply leaves it empty.
+    last_transcript: str = ""
+    #: Why the last listen produced nothing, for diagnosis.
+    last_reason: str = ""
+
     async def set_session(self, session_id: str | None) -> None:
         """Associate subsequent terminal operations with a visitor session."""
 
