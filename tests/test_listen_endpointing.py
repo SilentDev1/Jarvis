@@ -39,9 +39,9 @@ def hub():
     return LocalDeviceHub(FakeStore())
 
 
-def voiced(seconds: float, rate: int = 16000) -> bytes:
+def voiced(seconds: float, rate: int = 16000, amplitude: int = 9000) -> bytes:
     data = array("h", (
-        int(9000 * math.sin(2 * math.pi * 220 * i / rate))
+        int(amplitude * math.sin(2 * math.pi * 220 * i / rate))
         for i in range(int(rate * seconds))
     ))
     return data.tobytes()
@@ -143,8 +143,9 @@ def test_threshold_adapts_to_a_noisy_room():
     speech = hum(1.0, 14000)
     feed(h, speech)
     assert h._speech_profile()[0] > 0.0, "real speech must be recognised"
-    feed(h, noisy_room)
-    feed(h, noisy_room)
+    # Enough trailing room tone to clear the silence window.
+    for _ in range(int(ENDPOINT_SILENCE_SECONDS / 0.5) + 2):
+        feed(h, noisy_room)
     assert h._endpoint_reason() == "endpoint_silence"
 
 
@@ -155,12 +156,32 @@ def test_endpointing_is_logged_for_diagnosis():
     assert "peak" in source.split("listen ended:", 1)[1][:200]
 
 
-def test_quiet_syllables_still_count_as_speech():
-    # Speech is not uniform: unstressed syllables sit well below the loudest
-    # vowel. Too high a threshold made ordinary quiet passages look like the
-    # end of the turn and truncated visitors mid-sentence.
-    from jarvis_home.devices.local_protocol import ENDPOINT_VOICE_FACTOR
-    assert ENDPOINT_VOICE_FACTOR <= 0.2
+def test_hysteresis_separates_starting_speech_from_sustaining_it():
+    # One threshold cannot serve both jobs. High, and quiet syllables truncate
+    # the visitor. Low, and room noise stops the turn ever ending promptly.
+    from jarvis_home.devices.local_protocol import (
+        ENDPOINT_SPEECH_CONTINUE,
+        ENDPOINT_SPEECH_START,
+    )
+    assert ENDPOINT_SPEECH_START > ENDPOINT_SPEECH_CONTINUE
+
+
+def test_room_noise_alone_never_starts_an_utterance():
+    # Observed: an empty room produced a 7.8s turn reporting 1.3s of "voice".
+    h = hub()
+    for _ in range(12):
+        feed(h, voiced(0.4, amplitude=900))    # steady low-level room tone
+    voice, _, _ = h._speech_profile()
+    assert voice == 0.0
+
+
+def test_quiet_syllables_sustain_an_utterance_once_started():
+    h = hub()
+    feed(h, voiced(0.6, amplitude=12000))      # a stressed vowel starts it
+    feed(h, voiced(0.6, amplitude=2600))       # an unstressed syllable
+    voice, trailing, _ = h._speech_profile()
+    assert voice > 0.6, "the quiet syllable must not end the utterance"
+    assert trailing == 0.0
 
 
 def test_pause_between_clauses_does_not_end_the_turn():

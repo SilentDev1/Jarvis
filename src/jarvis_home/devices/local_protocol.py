@@ -36,7 +36,9 @@ ENDPOINT_SILENCE_SECONDS = 1.3
 # before someone starts does not end the turn immediately.
 ENDPOINT_MIN_SPEECH_SECONDS = 0.3
 # If nothing at all is heard, give up well before the maximum.
-ENDPOINT_NO_SPEECH_SECONDS = 5.0
+# If nothing has been said at all, give up quickly rather than holding the
+# visitor in an open microphone.
+ENDPOINT_NO_SPEECH_SECONDS = 3.0
 # Speech is detected relative to the loudest audio in the turn.
 #
 # A fixed absolute threshold cannot work: the measured room level at this door
@@ -48,11 +50,17 @@ ENDPOINT_NO_SPEECH_SECONDS = 5.0
 #
 # Measuring against the peak handles both. Speech is whatever is close to the
 # loudest thing heard; silence is whatever is well below it.
-# Speech is far from uniform in level: unstressed syllables and trailing
-# consonants sit well below the loudest vowel. At 0.30 only a third of a real
-# utterance registered as voice, so ordinary quiet passages looked like the end
-# of the turn.
-ENDPOINT_VOICE_FACTOR = 0.15
+# Hysteresis, as fractions of the turn's peak level.
+#
+# One threshold cannot serve both jobs. Set high, quiet syllables read as
+# silence and the visitor is truncated mid-sentence. Set low, room noise reads
+# as speech and the turn never ends promptly; in an empty room that produced a
+# 7.8 second turn with 1.3 seconds of imaginary "voice".
+#
+# Speech therefore needs a high level to begin and only a low one to continue:
+# noise cannot start an utterance, and an unstressed syllable cannot end one.
+ENDPOINT_SPEECH_START = 0.35
+ENDPOINT_SPEECH_CONTINUE = 0.15
 # A turn only contains speech if it has real dynamic range. Without this, a
 # uniformly noisy room would have its own hum treated as speech, because the
 # hum is by definition the loudest thing present.
@@ -353,13 +361,21 @@ class LocalDeviceHub:
         # because the hum is by definition the loudest thing present.
         if peak <= max(floor * ENDPOINT_DYNAMIC_RANGE, ENDPOINT_MIN_FLOOR):
             return 0.0, sum(seconds for seconds, _ in self._mic_levels), peak
-        threshold = max(peak * ENDPOINT_VOICE_FACTOR, ENDPOINT_MIN_FLOOR)
-        voice = sum(s for s, level in self._mic_levels if level > threshold)
+        start = max(peak * ENDPOINT_SPEECH_START, ENDPOINT_MIN_FLOOR)
+        continue_ = max(peak * ENDPOINT_SPEECH_CONTINUE, ENDPOINT_MIN_FLOOR)
+        voice = 0.0
         trailing = 0.0
-        for seconds, level in reversed(self._mic_levels):
-            if level > threshold:
-                break
-            trailing += seconds
+        speaking = False
+        for seconds, level in self._mic_levels:
+            if speaking:
+                speaking = level > continue_
+            else:
+                speaking = level > start
+            if speaking:
+                voice += seconds
+                trailing = 0.0
+            else:
+                trailing += seconds
         return voice, trailing, peak
 
     def _endpoint_reason(self) -> str | None:
