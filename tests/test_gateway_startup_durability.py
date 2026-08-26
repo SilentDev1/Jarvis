@@ -105,3 +105,11 @@ def test_installer_warns_when_the_repository_is_tcc_protected():
 def test_scripts_are_executable():
     for script in (SUPERVISOR, INSTALLER):
         assert script.stat().st_mode & stat.S_IXUSR
+
+
+def test_every_env_variant_is_ignored_except_the_example():
+    # A .env backup or per-host override carries live credentials and is easy
+    # to create by accident; only the example may ever be tracked.
+    ignore = (ROOT / ".gitignore").read_text()
+    assert ".env.*" in ignore
+    assert "!.env.example" in ignore

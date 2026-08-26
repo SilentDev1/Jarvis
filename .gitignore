@@ -1,4 +1,8 @@
 .env
+# Any .env variant carries live credentials. Backups and per-host overrides are
+# easy to create by accident, so ignore them all and re-allow only the example.
+.env.*
+!.env.example
 .venv/
 __pycache__/
 .pytest_cache/
