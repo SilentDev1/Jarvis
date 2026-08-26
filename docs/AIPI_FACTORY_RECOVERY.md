@@ -133,3 +133,13 @@ factory restoration method. Recovery becomes physically proven only after a
 post-write restore and complete stock acceptance test; the pre-flash recovery
 gate relies on the verified double read, exact map, valid images, manifest, and
 read-only restore dry run.
+
+## Two levels of recovery
+
+Normal recovery is OTA rollback: an image that fails its post-boot health
+window is never confirmed and the bootloader returns to the previous known-good
+slot automatically, with no cable. See `AIPI_OTA.md`.
+
+The USB full-flash restore documented above remains the last resort. OTA
+rollback cannot help with a corrupt bootloader or partition table, because both
+are outside the OTA slots. Keep the verified factory backup.

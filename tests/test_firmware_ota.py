@@ -136,3 +136,14 @@ def test_signature_verification_runs_off_the_websocket_task():
     assert "static char canonical[" in source
     assert "static uint8_t signature[" in source
     assert '"aipi_ota", 12288' in source
+
+
+def test_rollback_test_path_is_opt_in_and_uses_the_supported_mechanism():
+    source = read("local_connection.c")
+    assert "JARVIS_OTA_ROLLBACK_TEST" in source
+    # Must be compile-time gated so a normal build can never refuse to confirm.
+    assert "#if defined(JARVIS_OTA_ROLLBACK_TEST)" in source
+    # Rollback via the ESP-IDF call, not by crashing into a boot loop.
+    assert "esp_ota_mark_app_invalid_rollback_and_reboot()" in source
+    for crash in ("abort()", "assert(0)", "while (1);"):
+        assert crash not in source

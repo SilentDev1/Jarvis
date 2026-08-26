@@ -6,6 +6,7 @@
 #include "bringup.h"
 #include "audio_output.h"
 #include "ota_update.h"
+#include "esp_ota_ops.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -19,7 +20,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.7.3-ota-test"
+#define FIRMWARE_VERSION "0.7.4-rollback-test"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -220,9 +221,28 @@ static void on_playback_finished(uint32_t bytes, const char *reason) {
  * rolls back on the next reset. */
 #define OTA_HEALTH_WINDOW_MS 30000
 
+/* Deliberately fails confirmation, for exercising rollback.
+ *
+ * Enabled only by building with -DJARVIS_OTA_ROLLBACK_TEST=1. The image boots
+ * and runs normally, then asks the bootloader to roll back using the supported
+ * ESP-IDF call rather than crashing, so the test can never leave the device in
+ * a boot loop. */
 static void ota_confirm_task(void *unused) {
     (void)unused;
     vTaskDelay(pdMS_TO_TICKS(OTA_HEALTH_WINDOW_MS));
+#if defined(JARVIS_OTA_ROLLBACK_TEST) && JARVIS_OTA_ROLLBACK_TEST
+    ESP_LOGW(TAG, "ROLLBACK TEST build: refusing to confirm this image");
+    cJSON *notice = base_message("OTA_STATUS");
+    cJSON_AddStringToObject(notice, "state", "ROLLED_BACK");
+    cJSON_AddNumberToObject(notice, "percent", 0);
+    cJSON_AddStringToObject(notice, "detail", "rollback_test_build");
+    send_json(notice);
+    bringup_display_status("JARVIS", "ROLLING BACK", FIRMWARE_VERSION);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+    vTaskDelete(NULL);
+    return;
+#endif
     if (!online) {
         /* Connection lost during the window: do not confirm. A reset now rolls
          * back to the previous image. */

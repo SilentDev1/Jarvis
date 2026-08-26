@@ -1,5 +1,9 @@
 # Jarvis AiPi custom firmware
 
+Firmware is updated over the LAN; see `AIPI_OTA.md`. USB flashing is now only
+needed to embed a new OTA signing key, or to recover from a corrupt bootloader
+or partition table.
+
 `firmware/aipi-jarvis` is version `0.2.3-speaker-clock`. The controlled stage-1
 image was physically flashed on 2026-08-24 after the factory gate was
 reverified. It boots on the exact ESP32-S3 revision 0.2 unit without panic,

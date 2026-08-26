@@ -41,3 +41,23 @@ TLS (`wss`) is required when the connection leaves a trusted segmented LAN.
 For initial same-LAN operation, bearer authentication and network isolation are
 mandatory; plain `ws` must never be exposed through Tailscale Funnel,
 Cloudflare, port forwarding, or the public internet.
+
+## Firmware update messages
+
+Jarvis to device:
+
+- `OTA_OFFER` — `manifest`, `signature`, `url`. Refused unless the session is
+  authenticated and the terminal is idle.
+
+Device to Jarvis:
+
+- `OTA_STATUS` — `state`, `percent`, optional `detail`. States are
+  DOWNLOADING, VERIFYING, REBOOTING, SUCCEEDED, FAILED, ROLLED_BACK. An
+  unrecognised state is treated as a failure rather than guessed at.
+
+`DEVICE_STATUS` additionally reports `otaSlot` and `otaPendingVerify`, so
+Jarvis can see which slot is running and whether it is still unconfirmed.
+
+Firmware images are fetched over HTTP from the gateway at
+`/firmware/{version}/image`, authenticated with the same device credential as
+the WebSocket. Details in `AIPI_OTA.md`.
