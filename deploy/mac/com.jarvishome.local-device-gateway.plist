@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvishome.local-device-gateway</string>
+
+  <!-- Placeholders are substituted by scripts/install-launch-agents.sh.
+       The program is a dedicated launcher binary rather than /bin/sh so that
+       the macOS Full Disk Access grant this agent needs applies to one
+       purpose-built executable instead of every shell script on the machine.
+       WorkingDirectory is deliberately unset: launchd would resolve it before
+       exec, and it is inside a TCC-protected directory. The supervisor script
+       changes to the repository itself. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__LAUNCHER__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Logs live outside the TCC-protected repository because launchd opens
+       these paths itself, before the granted process starts. -->
+  <key>StandardOutPath</key>
+  <string>__LOGDIR__/local-device-gateway.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGDIR__/local-device-gateway.log</string>
+</dict>
+</plist>
