@@ -256,3 +256,76 @@ Lesson recorded for future validation: the original 2.096-second validation
 phrase passed while the delivery path was still broken for anything longer.
 A physical test phrase must exceed the buffer and fragmentation thresholds it
 is meant to exercise, otherwise it certifies a path that does not work.
+
+
+---
+
+# Microphone, streaming, and local STT physical validation
+
+Date: 2026-08-26 (America/New_York)
+Firmware: `0.5.1-mic-gain`
+
+## Result
+
+**MICROPHONE: PASS. MIC STREAM: PASS. LOCAL STT: PASS. HALF-DUPLEX: PASS.**
+
+The owner spoke "Jarvis microphone test" to the physical terminal and local
+recognition returned it exactly:
+
+```text
+attempt 1  peak=9303   rms=0.01530  voiced=0.175  accepted  "microphone test"
+attempt 2  peak=21348  rms=0.03563  voiced=0.292  accepted  "Jarvis microphone test"
+attempt 3  peak=23164  rms=0.05275  voiced=0.317  rejected  duplicate_utterance
+attempt 4  peak=8451   rms=0.01264  voiced=0.168  rejected  duplicate_utterance
+```
+
+## Signal quality
+
+Quiet-room noise floor measured peak 205-540. Speech peaked 9,303-23,164, so
+the margin over the floor is roughly 20-40x. The loudest sample reached 71% of
+full scale, so there is real headroom and no clipping. Captured duration
+matched the requested window: a 3-second capture returned 96,256 bytes against
+96,000 expected.
+
+## Half-duplex confirmed in practice
+
+Jarvis spoke a prompt immediately before each capture. The transcripts are the
+owner's voice, not the prompt, so the microphone did not open until the speaker
+had finished and the tail had settled. This is the property that stops the
+terminal talking to itself.
+
+## Filtering confirmed in practice
+
+Attempts 3 and 4 recognised the phrase correctly and were still rejected as
+duplicates. This is the intended behaviour: one question gets one answer, and a
+repeated recognition does not produce a second spoken reply.
+
+## Codec configuration, verified by readback
+
+```text
+ADC register 0x14 = 0x1A   analog mic, single ended, PGA gain
+ADC register 0x15 = 0x40   ADC ramp
+ADC register 0x16 = 0x05   PGA gain scale, 30 dB
+ADC register 0x17 = 0xBF   ADC digital volume
+ADC register 0x1B = 0x0A   high-pass / DC removal
+ADC register 0x1C = 0x6A
+```
+
+Register `0x16` was omitted in the first implementation. Espressif's reference
+sets it, and without it the analog front end sat near unity: the same quiet
+room measured peak 144 instead of 540, and speech would not have cleared the
+noise gate. The registers are now read back after initialization rather than
+trusted, because a quiet microphone is otherwise indistinguishable from a
+register write that did not take.
+
+## Inconclusive result recorded
+
+An earlier run of this test returned silence on three attempts. That was not a
+hardware fault: the owner was not at the device. It is recorded because the
+measurements looked exactly like a failing microphone, and the correct response
+was to ask rather than to start flashing speculative gain increases.
+
+## Scope
+
+Microphone capture and recognition only. Camera-triggered conversation and
+multi-turn visitor sessions remain separate phases.
