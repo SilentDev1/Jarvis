@@ -137,3 +137,35 @@ worked.
 - `not_newer_than_installed`: pass `force` to reinstall deliberately.
 - Update reported but version unchanged: the health window failed and the
   bootloader rolled back. Check the serial log for a panic in the new build.
+
+## Physical validation, cable-free
+
+2026-08-26. The device was disconnected from the Mac entirely: no USB data
+connection, no serial console, powered from its own supply. Confirmed by the
+serial device disappearing from the host while the terminal stayed reachable
+over the LAN.
+
+`0.9.0-power-latch` to `0.9.1-wireless-ota`:
+
+```text
+t=6s    DOWNLOADING 50%
+t=12s   REBOOTING
+t=18s   0.9.1-wireless-ota   (new image booted and reconnected)
+t=48s   SUCCEEDED            (health window passed, image confirmed)
+```
+
+About 48 seconds from the owner triggering the update to the image being
+marked valid. Afterwards the device kept its IP, its Wi-Fi and device
+credentials, all seven capabilities, and audio still worked.
+
+This was the point of the milestone: updating the terminal no longer requires
+unplugging it and carrying it to the Mac. USB is now needed only to embed a new
+signing key or to recover from a corrupt bootloader.
+
+## Battery power
+
+The terminal previously stayed powered only while the left button was held when
+running on battery, and worked normally on USB. USB feeds the rail directly; on
+battery the button only closes the power latch while pressed, and firmware must
+drive the hold pin to keep the rails up. GPIO10 is that pin, asserted first
+thing in `app_main`. See `AIPI_CUSTOM_FIRMWARE.md`.
