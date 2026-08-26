@@ -243,3 +243,16 @@ LAN the terminal sits on.
 A request beyond the 30-second stream limit is rejected before any device
 traffic. The tone endpoint's own limit was aligned to the protocol bound rather
 than being a second, stricter number, so tests exercise the real boundary.
+
+## Long-utterance physical confirmation: PASS
+
+The owner heard the 3.483-second phrase "Audio streaming and amplifier
+fail-safe are verified." (111,446 bytes in 55 chunks) complete through its
+final word on firmware `0.3.2-audio-watchdog`. This confirms fragment
+reassembly physically, not merely by return code. The equivalent utterance
+would have been truncated part-way through on `0.3.0-audio-stream`.
+
+Lesson recorded for future validation: the original 2.096-second validation
+phrase passed while the delivery path was still broken for anything longer.
+A physical test phrase must exceed the buffer and fragmentation thresholds it
+is meant to exercise, otherwise it certifies a path that does not work.
