@@ -20,7 +20,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.8.0-ota"
+#define FIRMWARE_VERSION "0.9.0-power-latch"
 #define MAX_RX_BYTES 4096
 /* Audio chunks arrive as binary frames: an 8-byte header plus payload. The
  * websocket receive buffer must hold a whole maximum-size frame, otherwise the
@@ -41,6 +41,10 @@ static volatile bool capture_stop_requested;
 static uint16_t capture_stream_id;
 static uint32_t capture_max_ms;
 static TaskHandle_t reconnect_task_handle;
+
+const char *local_connection_firmware_version(void) {
+    return FIRMWARE_VERSION;
+}
 
 static void reconnect_task(void *arg) {
     (void)arg;

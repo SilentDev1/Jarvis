@@ -19,5 +19,15 @@
 #define AIPI_BUTTON GPIO_NUM_42
 #define AIPI_WIFI_RESET_HOLD_MS 8000
 
-/* GPIO10 is a community-reported board power control. Never configure it. */
-#define AIPI_UNVERIFIED_POWER_GPIO GPIO_NUM_10
+/* Board power latch.
+ *
+ * On USB the rail is powered directly and this pin is irrelevant. On battery
+ * the power button only closes the latch while it is held; firmware must drive
+ * this pin high to hold the rails up, or the device dies the moment the button
+ * is released. That was the observed symptom.
+ *
+ * Corroborated by the known-working AiPi Lite reference firmware ("GPIO10 HIGH
+ * keeps rails up") and by xiaozhi-esp32, which it cites. GPIO10 is an ordinary
+ * ESP32-S3 GPIO: the strapping pins are 0, 3, 45 and 46, and the flash and
+ * PSRAM pins are in the 26-32 range, so driving it is safe from the MCU side. */
+#define AIPI_POWER_LATCH GPIO_NUM_10

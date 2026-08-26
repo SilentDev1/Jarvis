@@ -147,3 +147,12 @@ def test_rollback_test_path_is_opt_in_and_uses_the_supported_mechanism():
     assert "esp_ota_mark_app_invalid_rollback_and_reboot()" in source
     for crash in ("abort()", "assert(0)", "while (1);"):
         assert crash not in source
+
+
+def test_boot_banner_cannot_drift_from_the_reported_version():
+    # The banner was a hardcoded literal and had drifted six versions behind
+    # the firmware version, which misleads anyone reading a serial log.
+    source = (MAIN / "app_main.c").read_text()
+    assert "local_connection_firmware_version()" in source
+    import re
+    assert not re.search(r'"Jarvis AiPi \d+\.\d+\.\d+', source)

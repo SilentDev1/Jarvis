@@ -142,9 +142,21 @@ def test_connection_loss_closes_the_microphone():
     assert "capture_stop_requested = true" in disconnect[:400]
 
 
-def test_gpio10_is_still_never_configured():
+def test_gpio10_is_only_touched_by_the_power_latch():
+    # GPIO10 is the board power latch. Only the deliberate boot-time assertion
+    # may drive it; no audio or protocol code may repurpose it.
     for name in ("audio_output.c", "local_connection.c", "es8311_codec.c"):
         assert "GPIO_NUM_10" not in read(name)
+        assert "AIPI_POWER_LATCH" not in read(name)
+
+
+def test_power_latch_is_asserted_before_anything_slow():
+    # On battery the latch is only held while the button is pressed, so a slow
+    # init ahead of this would drop the rails before the pin is asserted.
+    source = (MAIN / "app_main.c").read_text()
+    body = source.split("void app_main(void) {", 1)[1]
+    assert body.index("hold_board_power()") < body.index("nvs_flash_init")
+    assert "gpio_set_level(AIPI_POWER_LATCH, 1)" in source
 
 
 def test_project_version_matches_the_reported_firmware_version():

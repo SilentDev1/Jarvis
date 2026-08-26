@@ -1,3 +1,4 @@
+#include "aipi_board.h"
 #include "bringup.h"
 #include "audio_output.h"
 #include "esp_chip_info.h"
@@ -11,18 +12,33 @@
 
 static const char *TAG = "jarvis_aipi";
 
+/* Hold the board's own power on.
+ *
+ * Done first, before logging or NVS, because on battery the latch only stays
+ * closed while the power button is held. Anything slow ahead of this risks the
+ * rails dropping before the pin is asserted. */
+static void hold_board_power(void) {
+    gpio_config_t latch = {
+        .pin_bit_mask = 1ULL << AIPI_POWER_LATCH,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&latch);
+    gpio_set_level(AIPI_POWER_LATCH, 1);
+}
+
 void app_main(void) {
+    hold_board_power();
     terminal_state_t state = TERMINAL_BOOTING;
     esp_chip_info_t chip;
     uint32_t flash_size = 0;
     esp_chip_info(&chip);
     esp_flash_get_size(NULL, &flash_size);
-    ESP_LOGI(TAG, "Jarvis AiPi 0.2.3-speaker-clock");
+    ESP_LOGI(TAG, "Jarvis AiPi %s", local_connection_firmware_version());
     ESP_LOGI(TAG, "chip=ESP32-S3 revision=%d cores=%d flash=%luMB", chip.revision,
              chip.cores, (unsigned long)(flash_size / (1024 * 1024)));
     ESP_LOGI(TAG, "PSRAM total=%u free=%u", heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    ESP_LOGW(TAG, "GPIO10 board-power control is untouched");
+    ESP_LOGI(TAG, "GPIO10 power latch asserted HIGH (battery rails held)");
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "initializing custom NVS partition; factory NVS at 0x9000 is untouched");
