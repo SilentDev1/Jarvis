@@ -1,4 +1,5 @@
 #include "bringup.h"
+#include "audio_output.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -16,7 +17,7 @@ void app_main(void) {
     uint32_t flash_size = 0;
     esp_chip_info(&chip);
     esp_flash_get_size(NULL, &flash_size);
-    ESP_LOGI(TAG, "Jarvis AiPi 0.2.0-local");
+    ESP_LOGI(TAG, "Jarvis AiPi 0.2.3-speaker-clock");
     ESP_LOGI(TAG, "chip=ESP32-S3 revision=%d cores=%d flash=%luMB", chip.revision,
              chip.cores, (unsigned long)(flash_size / (1024 * 1024)));
     ESP_LOGI(TAG, "PSRAM total=%u free=%u", heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
@@ -37,13 +38,14 @@ void app_main(void) {
     bool display_ready = bringup_display_init() == ESP_OK;
     bool button_ready = bringup_button_start() == ESP_OK;
     bool codec_ready = bringup_codec_probe();
+    bool audio_ready = codec_ready && audio_output_prepare() == ESP_OK;
     if (display_ready) {
         bringup_display_status("JARVIS", "BRING-UP 0.1.0",
-                               codec_ready ? "CODEC: PASS" : "CODEC: FAIL");
+                               audio_ready ? "AUDIO: READY" : "AUDIO: FAIL");
     }
-    ESP_LOGI(TAG, "state=%s display=%s button=%s codec=%s", terminal_state_name(state),
+    ESP_LOGI(TAG, "state=%s display=%s button=%s codec=%s audio=%s", terminal_state_name(state),
              display_ready ? "PASS" : "FAIL", button_ready ? "PASS" : "FAIL",
-             codec_ready ? "PASS" : "FAIL");
+             codec_ready ? "PASS" : "FAIL", audio_ready ? "PASS" : "FAIL");
     if (result == ESP_OK && wifi_provision_boot_reset_requested()) {
         ESP_ERROR_CHECK(wifi_provision_clear_custom_config());
     }

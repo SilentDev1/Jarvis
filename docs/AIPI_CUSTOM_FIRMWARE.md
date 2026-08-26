@@ -1,7 +1,8 @@
 # Jarvis AiPi custom firmware
 
-`firmware/aipi-jarvis` is version `0.2.0-local`. The controlled stage-1 image
-was physically flashed on 2026-08-24 after the factory gate was reverified. It
+`firmware/aipi-jarvis` is version `0.2.3-speaker-clock`. The controlled stage-1
+image was physically flashed on 2026-08-24 after the factory gate was
+reverified. It
 boots on the exact ESP32-S3 revision 0.2 unit without panic, watchdog, brownout,
 or partition errors. The boot log verifies 16 MB QIO flash, 8 MB octal PSRAM at
 80 MHz, a passing PSRAM memory test, ESP-IDF 5.3.2, and ES8311 detection at the
@@ -39,7 +40,12 @@ unsafe and is never configured.
 | LCD backlight | 3 | physically verified on this unit |
 | ES8311 I2C SCL/SDA | 4/5 | physically verified on this unit by codec probe |
 | LCD D/C, CS, SCLK, MOSI, reset | 7/15/16/17/18 | physically verified on this unit |
-| speaker amplifier enable | 9 | community corroborated; forced low only |
+| speaker amplifier enable | 9 | physically verified on this unit by audible tone |
+| I2S MCLK | 6 | physically verified on this unit by audible tone |
+| I2S DOUT | 11 | physically verified on this unit by audible tone |
+| I2S WS/LRCLK | 12 | physically verified on this unit by audible tone |
+| I2S DIN | 13 | known mapping; deliberately unused |
+| I2S BCLK | 14 | physically verified on this unit by audible tone |
 | function button | 42 | physically verified on this unit |
 | board power control | 10 | unverified; never configure |
 
@@ -90,5 +96,62 @@ Physical validation on 2026-08-25 passed boot reconnect, authenticated ONLINE
 registration, heartbeat/status telemetry, a controlled Wi-Fi interruption, and
 a Jarvis gateway stop/start. The gateway restart exposed a library reconnect
 gap; firmware now uses an explicit five-second supervised reconnect loop. The
-same powered board then returned ONLINE without rebooting. Speaker, microphone,
-STT, TTS, and camera-triggered speech remain disabled in this image.
+same powered board then returned ONLINE without rebooting.
+
+## Speaker output — physically validated
+
+Speaker output passed physical validation on 2026-08-26 on this exact unit.
+
+Implementation. The failed `espressif/es8311` component integration was removed
+because it linked the legacy I2C driver alongside the new one and panicked the
+device. It is replaced by a narrow project-local adapter that uses only the
+ESP-IDF 5.3 modern I2C master API: `i2c_master_bus_handle_t`,
+`i2c_master_dev_handle_t`, `i2c_master_transmit()`, and
+`i2c_master_transmit_receive()`. `driver/i2c.h` and every legacy I2C call are
+absent. One shared singleton I2C bus and one persistent ES8311 device handle
+are created once at startup.
+
+Signal path. I2S standard mode, Philips framing, 16 kHz PCM16, 4.096 MHz MCLK,
+stereo slots carrying duplicated mono samples, on MCLK GPIO6, BCLK GPIO14, WS
+GPIO12, and DOUT GPIO11. ES8311 register `0x13 = 0x18` enables HP and speaker
+outputs. Register `0x04 = 0x20` sets the DAC OSR required by Espressif's
+`{4096000, 16000}` coefficient entry; an earlier `0x10` was wrong and produced
+silence. I2S and GDMA are allocated once during startup with the amplifier
+disabled. An earlier build allocated them inside a 2048-byte button task and
+hit an interrupt watchdog panic in `gdma_acquire_pair_handle`; the button task
+now has 6144 bytes of stack and performs no allocation.
+
+Safety envelope. The only audio in this image is one bounded diagnostic tone:
+880 Hz, 400 ms, PCM amplitude 16,000 against a 32,767 full scale, codec volume
+capped at 60%. It is armed only when the authenticated local connection reaches
+ONLINE and is triggered only by an explicit right-side GPIO42 press. There is
+no boot-time autoplay and no repeating loop. The GPIO9 amplifier is enabled
+only for the playback window and disabled immediately afterward. GPIO10 board
+power is never configured and the microphone is never enabled.
+
+Evidence. Binary `build/jarvis_aipi.bin`, SHA-256
+`f2040d216ee447b78e2d702c7c480e68ef6819bcba742bebee7c5b19da3bb17b`, 1,023,968
+bytes, `0xf9fe0` of the app partition with 75% free. A clean rebuild reproduces
+the identical hash, so the tree matches the flashed image. Boot serial verified
+`GPIO10 board-power control is untouched`, `ES8311 new-I2C probe: PASS`,
+`ES8311 speaker-only init PASS MCLK=4096000 rate=16000 PCM16`, `I2S TX ready
+MCLK=GPIO6 BCLK=GPIO14 WS=GPIO12 DOUT=GPIO11`, `display=PASS button=PASS
+codec=PASS audio=PASS`, and `authenticated local connection ONLINE`. One
+monitored GPIO42 press produced:
+
+```text
+BUTTON_DOWN
+speaker amplifier ENABLED
+one-shot low-volume speaker tone START
+speaker amplifier DISABLED
+one-shot speaker tone END result=ESP_OK
+BUTTON_UP
+```
+
+The amplifier window measured 430 ms against the 400 ms tone. No panic,
+reboot, brownout, or watchdog occurred and the device stayed ONLINE. The owner
+audibly confirmed a clear tone from the physical speaker. That owner
+confirmation, not the `ESP_OK` return, is what makes this a PASS.
+
+Microphone capture, STT, TTS, network-delivered audio, and camera-triggered
+speech remain disabled in this image.

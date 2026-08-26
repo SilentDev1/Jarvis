@@ -5,8 +5,9 @@
 #include <string.h>
 
 #include "aipi_board.h"
+#include "audio_output.h"
+#include "es8311_codec.h"
 #include "driver/gpio.h"
-#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -156,6 +157,13 @@ static void button_task(void *unused) {
             stable = sample; count = 0;
             if (stable != prior) {
                 ESP_LOGI(TAG, "%s", stable ? "BUTTON_UP" : "BUTTON_DOWN");
+                if (!stable && audio_output_manual_test_enabled()) {
+                    esp_err_t result = audio_output_test_tone();
+                    if (result != ESP_OK) {
+                        ESP_LOGE(TAG, "speaker test failed safely: %s", esp_err_to_name(result));
+                        bringup_display_status("JARVIS", "ONLINE", "AUDIO: ERROR");
+                    }
+                }
                 prior = stable;
             }
         }
@@ -169,7 +177,9 @@ esp_err_t bringup_button_start(void) {
         .pull_up_en = GPIO_PULLUP_ENABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&input), TAG, "button gpio");
-    return xTaskCreate(button_task, "aipi_button", 2048, NULL, 5, NULL) == pdPASS
+    /* Tone generation uses bounded stack PCM buffers. Keep ample headroom so a
+       button press cannot corrupt the I2S/GDMA driver state. */
+    return xTaskCreate(button_task, "aipi_button", 6144, NULL, 5, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
@@ -180,16 +190,5 @@ bool bringup_codec_probe(void) {
     if (gpio_config(&amp) != ESP_OK) return false;
     gpio_set_level(AIPI_SPEAKER_ENABLE, 0);
     ESP_LOGI(TAG, "speaker amplifier forced OFF for stage-1 validation");
-    i2c_master_bus_handle_t bus = NULL;
-    i2c_master_bus_config_t config = {
-        .i2c_port = I2C_NUM_0, .sda_io_num = AIPI_AUDIO_I2C_SDA,
-        .scl_io_num = AIPI_AUDIO_I2C_SCL, .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7, .flags.enable_internal_pullup = true,
-    };
-    if (i2c_new_master_bus(&config, &bus) != ESP_OK) return false;
-    bool found = i2c_master_probe(bus, 0x18, 100) == ESP_OK ||
-                 i2c_master_probe(bus, 0x19, 100) == ESP_OK;
-    ESP_LOGI(TAG, "ES8311 probe: %s", found ? "PASS" : "FAIL");
-    i2c_del_master_bus(bus);
-    return found;
+    return es8311_codec_probe();
 }

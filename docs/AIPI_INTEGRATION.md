@@ -1,5 +1,13 @@
 # AiPi Lite integration
 
+> **Scope note.** This document describes the stock-firmware / XDC cloud-agent
+> integration path. It is a separate track from the custom
+> `firmware/aipi-jarvis` image. As of 2026-08-26 the physical unit runs custom
+> firmware `0.2.3-speaker-clock`, whose speaker output is physically verified
+> over a direct authenticated LAN WebSocket; see `AIPI_CUSTOM_FIRMWARE.md`.
+> Nothing in this document's XDC round trip is verified by that result, and the
+> two paths must not be conflated.
+
 ## Status and architecture
 
 Stock firmware is preserved. AiPi uses its factory microphone, speaker, display,
@@ -115,7 +123,9 @@ XDC hostname unchanged.
 Physical AiPi -> XDC -> MCP -> speaker delivery is **AWAITING PHYSICAL
 VERIFICATION**. An official external MCP client has successfully discovered and
 called the gateway, but XDC Preview Chat previously answered without invoking
-the tool. Discovery alone is not proof of the physical round trip.
+the tool. Discovery alone is not proof of the physical round trip. The verified
+2026-08-26 speaker tone was produced by the custom firmware over the direct LAN
+gateway and says nothing about this cloud path.
 
 Troubleshooting:
 
@@ -131,7 +141,13 @@ Troubleshooting:
 
 Display lifecycle control is not available through the verified stock XDC MCP
 surface, so factory listening/thinking/speaking UI remains in use. Push-to-talk
-or the stock activation behavior is retained. Do not flash firmware; any future
-firmware path requires a verified full-flash/NVS backup plan and owner approval.
+or the stock activation behavior is retained.
+
+Firmware flashing is no longer prohibited outright, but it remains gated. The
+verified full-image factory backup and recovery gate now exist, and the unit
+runs the custom image. Every flash must still go through
+`scripts/aipi-flash.sh`, which refuses to run without the recovery-gate marker
+and explicit authorization. `idf.py erase-flash` must never be run against this
+device. Reverting to stock is documented in `AIPI_FACTORY_RECOVERY.md`.
 The exact stock activation boundary and safe standby workflow are documented in
 `docs/AIPI_ACTIVATION.md`.

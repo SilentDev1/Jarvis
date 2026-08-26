@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "bringup.h"
+#include "audio_output.h"
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -17,7 +18,7 @@
 #include "freertos/task.h"
 
 #define DEVICE_ID "aipi-front-door"
-#define FIRMWARE_VERSION "0.2.0-local"
+#define FIRMWARE_VERSION "0.2.3-speaker-clock"
 #define MAX_RX_BYTES 4096
 
 static const char *TAG = "jarvis_local";
@@ -105,6 +106,7 @@ static void process_control(const char *data, int length) {
     }
     if (!strcmp(type->valuestring, "DEVICE_READY")) {
         online = true;
+        audio_output_set_manual_test_enabled(true);
         bringup_display_status4("JARVIS", "WI-FI: OK", "JARVIS: ONLINE", FIRMWARE_VERSION);
         ESP_LOGI(TAG, "authenticated local connection ONLINE");
         send_status();
@@ -125,6 +127,7 @@ static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, 
     esp_websocket_event_data_t *event = data;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         online = false;
+        audio_output_set_manual_test_enabled(false);
         bringup_display_status("JARVIS", "WI-FI: OK", "AUTHENTICATING");
         send_hello();
     } else if (event_id == WEBSOCKET_EVENT_DATA && event->op_code == 1 &&

@@ -124,5 +124,37 @@ Before any future owner-approved migration:
 10. Run bench acceptance tests for mic/speaker/display/button, network loss,
     timeout-to-standby, power loss, rollback, privacy, and restore-to-stock.
 
-Stop before erase/write/flash until the owner explicitly approves this plan and
-the factory backup and recovery proof are complete.
+## Plan progress (updated 2026-08-26)
+
+The owner approved this plan and the custom-firmware path is underway on
+`firmware/aipi-jarvis`.
+
+- Steps 1-4 complete. The full 16 MB flash, every partition, NVS, OTA data,
+  bootloader, and partition table are backed up with verified checksums, and
+  the restore path is documented in `AIPI_FACTORY_RECOVERY.md` and gated by
+  `scripts/aipi-restore-factory.sh`.
+- Step 5 partially complete. Display SPI 7/15/16/17/18 with backlight 3,
+  function button 42, ES8311 I2C on 4/5, amplifier enable 9, and I2S MCLK 6 /
+  BCLK 14 / WS 12 / DOUT 11 are all now physically verified on this unit. I2S
+  DIN 13 is a known mapping but deliberately unused. Status LED 46 is
+  unverified. Power-control GPIO10 is unverified and is never configured.
+- Step 6 partially complete. Bounded local playback is physically verified: a
+  bounded 880 Hz, 400 ms diagnostic tone was audibly confirmed by the owner on
+  firmware `0.2.3-speaker-clock`. Display states, button
+  behaviour, and safe power handling are verified. Audio capture and echo
+  suppression are NOT started and remain a separately gated phase.
+- Step 7 partially complete. The device holds an outbound authenticated
+  WebSocket to Jarvis over the LAN using the `jarvis.device.v1` subprotocol,
+  with heartbeat, state, bounded health telemetry, and a supervised
+  five-second reconnect loop. The `speak`, `listen_start`, `audio`, and
+  `listen_stop` messages are not implemented yet.
+- Steps 8-10 not started.
+
+Ordering constraint. Microphone capture, STT, TTS, and camera-triggered visitor
+speech must not begin until streamed bounded output playback passes on its own,
+and microphone input is a separate gated phase after that.
+
+Flashing is approved and gated rather than prohibited: every write goes through
+`scripts/aipi-flash.sh`, which refuses without the verified recovery-gate marker
+and explicit authorization. `idf.py erase-flash` must never be run against this
+device.
