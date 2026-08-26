@@ -111,3 +111,51 @@ subject.
 
 Minor: two visitor sessions were left `active` and never closed during bench
 testing. Worth a look before this runs unattended.
+
+## Calibrated and validated at the real doorstep
+
+2026-08-26, camera mounted on the porch.
+
+Zones were derived from 22 recorded detections of a person standing where a
+visitor stands, then checked against places a person can be without being a
+visitor. All 22 stances classify as interaction; the driveway, street,
+neighbouring yard, beside the parked car, and just past the porch railing all
+do not.
+
+Two failures the calibration exposed that drawing by eye would not have:
+
+Zones must reach y=1.00. A visitor at the door is close, so their feet sit on
+the bottom edge of the frame. A polygon stopping at 0.99 excluded exactly the
+people it existed to catch, and 13 of the recorded stances classified as no
+zone at all.
+
+Interaction must stop at the porch railing. An edge at x=0.53 reached past the
+rail and matched a person mid-driveway, who is not at the door.
+
+Detection through the screen door is confirmed: confidence 0.68 to 0.92.
+
+## End-to-end run
+
+With the calibrated zones and greeting enabled:
+
+```text
+16:52:14  PERSON_DETECTED          zone: interaction
+16:52:17  VISITOR_SESSION_STARTED
+          phase GREETING -> SESSION_COMPLETE
+          greeting "Hi, how can I help you?"
+          end_reason visitor_departed, turns 0
+```
+
+The terminal returned to IDLE. Earlier, the same greeting text was played to
+the AiPi and the owner confirmed hearing it clearly; the camera and the speaker
+are in different rooms, so the two halves were confirmed separately rather than
+in one observation.
+
+`CAMERA_GREETING_ENABLED` is now true, which is the intended state: the zones
+exclude the street and driveway, so passers-by cannot trigger it. Anyone
+stepping onto the porch will be greeted, re-greeted about every 90 seconds
+while they remain.
+
+The zone values live in `.env.example` as well as `.env`, because `.env` is
+gitignored and the calibration would otherwise be lost on a fresh setup. They
+are specific to this camera position and must be redrawn if it moves.
