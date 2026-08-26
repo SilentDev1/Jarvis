@@ -67,3 +67,47 @@ With the camera disconnected the pipeline reported presence `UNKNOWN`, not
 the snapshot and face recognition all still run; only the unprompted speech is
 withheld. Enable it after standing where a visitor stands and confirming the
 interaction zone matches.
+
+## Camera-triggered greeting: validated in two halves
+
+2026-08-26. Confirmed, but not simultaneously, because the camera was in the
+living room and the AiPi is in the office.
+
+Camera half. With the camera bench-mounted indoors, a person entering the
+interaction zone produced:
+
+```text
+session    3507277f-b5f3-4090-90ae-dcce7ce7dc6f
+greeting   "Hi, how can I help you?"
+phase      complete   end_reason: no_speech_timeout   turns: 0
+```
+
+`no_speech_timeout` is the useful detail: it proves the greeting was spoken and
+the microphone then opened and listened, timing out only because nobody
+answered. A failure to speak would have ended `provider_error` instead.
+
+Speaker half. The same greeting text was streamed to the terminal and the owner
+confirmed hearing it clearly: 45,910 bytes, 1.435 s.
+
+## Re-greeting is expected, and loud on a bench
+
+Standing in view produced a new session roughly every 90 seconds: the 60-second
+cooldown plus the 15-second no-speech timeout. At a real door that is wanted, a
+lingering visitor gets re-engaged. Pointed at a living room it means the
+household is greeted every 90 seconds, which is why the greeting is opt-in.
+
+## Current state and what must be redone
+
+`CAMERA_GREETING_ENABLED` is back to false.
+
+The zones currently in `.env` are **bench zones**, with the interaction zone
+covering most of the frame so any detected person exercised the greeting path.
+They are meaningless for a real door view and must be redrawn once the camera
+is mounted in its final position and someone stands where a visitor stands.
+
+Detection through the screen door is still unproven. The detection that
+validated the pipeline happened indoors with no screen between camera and
+subject.
+
+Minor: two visitor sessions were left `active` and never closed during bench
+testing. Worth a look before this runs unattended.
