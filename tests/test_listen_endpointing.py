@@ -153,3 +153,26 @@ def test_endpointing_is_logged_for_diagnosis():
     source = Path("src/jarvis_home/devices/local_protocol.py").read_text()
     assert "listen ended:" in source
     assert "peak" in source.split("listen ended:", 1)[1][:200]
+
+
+def test_quiet_syllables_still_count_as_speech():
+    # Speech is not uniform: unstressed syllables sit well below the loudest
+    # vowel. Too high a threshold made ordinary quiet passages look like the
+    # end of the turn and truncated visitors mid-sentence.
+    from jarvis_home.devices.local_protocol import ENDPOINT_VOICE_FACTOR
+    assert ENDPOINT_VOICE_FACTOR <= 0.2
+
+
+def test_pause_between_clauses_does_not_end_the_turn():
+    # Observed truncation: "My name is Hung. I'm here to look at" ended on the
+    # pause after the first sentence.
+    from jarvis_home.devices.local_protocol import ENDPOINT_SILENCE_SECONDS
+    assert ENDPOINT_SILENCE_SECONDS >= 1.2
+
+    h = hub()
+    feed(h, voiced(1.2))            # "My name is Hung."
+    feed(h, silence(1.0))           # natural pause between sentences
+    assert h._endpoint_reason() is None, "must not end on a between-clause pause"
+    feed(h, voiced(1.5))            # "I'm here to look at the car."
+    feed(h, silence(ENDPOINT_SILENCE_SECONDS + 0.2))
+    assert h._endpoint_reason() == "endpoint_silence"

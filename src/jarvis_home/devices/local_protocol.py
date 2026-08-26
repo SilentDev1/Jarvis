@@ -29,7 +29,9 @@ from .terminal_state import TerminalState, TerminalStateMachine
 # Endpointing. A fixed window is the worst of both worlds: too short and it
 # cuts a visitor off mid-sentence, too long and everyone waits out dead air
 # after they have finished. Listen generously, but stop as soon as they stop.
-ENDPOINT_SILENCE_SECONDS = 0.9
+# Long enough to survive the pause between clauses. Observed truncation at
+# 0.9s: "My name is Hung. I'm here to look at" ended mid-sentence.
+ENDPOINT_SILENCE_SECONDS = 1.3
 # Require some real speech before trusting silence, so a breath or a gap
 # before someone starts does not end the turn immediately.
 ENDPOINT_MIN_SPEECH_SECONDS = 0.3
@@ -46,7 +48,11 @@ ENDPOINT_NO_SPEECH_SECONDS = 5.0
 #
 # Measuring against the peak handles both. Speech is whatever is close to the
 # loudest thing heard; silence is whatever is well below it.
-ENDPOINT_VOICE_FACTOR = 0.30
+# Speech is far from uniform in level: unstressed syllables and trailing
+# consonants sit well below the loudest vowel. At 0.30 only a third of a real
+# utterance registered as voice, so ordinary quiet passages looked like the end
+# of the turn.
+ENDPOINT_VOICE_FACTOR = 0.15
 # A turn only contains speech if it has real dynamic range. Without this, a
 # uniformly noisy room would have its own hum treated as speech, because the
 # hum is by definition the loudest thing present.
