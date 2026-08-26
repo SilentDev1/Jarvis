@@ -4,6 +4,7 @@ import logging
 import math
 import secrets
 import sys
+import time
 from array import array
 from contextlib import asynccontextmanager
 
@@ -81,6 +82,7 @@ async def health():
         # what the board reports about itself; this is what Jarvis has decided,
         # and it is the one audio, display, and the arc reactor consume.
         "terminal": hub.terminal.public(),
+        "arc": hub.arc.frame(hub.terminal.state, time.monotonic()).public(),
     }
 
 

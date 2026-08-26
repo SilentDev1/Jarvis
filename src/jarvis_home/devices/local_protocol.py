@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
 from ..persistence import Device, utcnow
+from .arc_reactor import ArcReactorController
 from .audio_stream import (
     AUDIO_MAX_STREAM_BYTES,
     AUDIO_SAMPLE_BYTES,
@@ -106,6 +107,9 @@ class LocalDeviceHub:
         # The single authoritative terminal state. Audio, display, and the arc
         # reactor all read this rather than tracking their own.
         self.terminal = TerminalStateMachine()
+        # Consumes the terminal state and the outgoing audio envelope. Disabled
+        # until the physical light is identified.
+        self.arc = ArcReactorController()
 
     def mark_offline(self) -> None:
         self.health = LocalDeviceHealth()
@@ -182,6 +186,9 @@ class LocalDeviceHub:
         try:
             await self.send("AUDIO_BEGIN", **stream.begin_message())
             for payload in chunks:
+                # Envelope is computed here, on the host, so the device does no
+                # floating-point work between I2S writes.
+                self.arc.observe_audio(payload)
                 await self.websocket.send_bytes(stream.next_chunk(payload))
             summary = stream.end_message()
             await self.send("AUDIO_END", **summary)
