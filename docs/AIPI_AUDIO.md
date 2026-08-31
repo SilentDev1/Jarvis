@@ -19,9 +19,12 @@ Local TTS is working. The previously recorded FAIL was environment-specific
 rather than a code defect. Empty synthesis is still rejected rather than
 reported as success.
 
-Microphone capture and STT remain disabled on the device and are a separate
-gated phase that must not begin until streamed output playback passes on its
-own.
+Microphone capture and STT are **no longer disabled**. That gate was written
+before streamed playback passed; playback passed on 2026-08-26 and the
+microphone phase then ran on the same unit. A complete physical voice turn is
+recorded in `AIPI_SPEAKER_VALIDATION.md` — 6.0 s of 16 kHz PCM16 capture
+(192,000 bytes), local faster-whisper recognition, local reasoning, and spoken
+reply — with the amplifier disabled before the microphone opens.
 
 ## Protocol
 

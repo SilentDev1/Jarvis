@@ -31,3 +31,6 @@ data/audio/
 *.pcm
 *.wav
 .DS_Store
+
+# Out-of-tree verification build (JARVIS-001); the in-tree build/ is ignored above.
+firmware/aipi-jarvis/build-verify/

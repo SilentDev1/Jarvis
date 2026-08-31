@@ -1,11 +1,14 @@
 """Arc reactor light behaviour.
 
-This is the software half only. No GPIO is assigned and the controller is
-disabled by default, because the physical light has not been identified: its
-voltage, current draw, connector, and whether it is simple PWM, RGB, or
-addressable are all unknown, and an ESP32 GPIO must never source the current a
-decorative light typically wants. Selecting a pin before that is known risks
-the board.
+This is the software half only: it computes frames and never touches a GPIO.
+The physical light IS identified — an onboard single-pixel WS2812 on GPIO46,
+wired and powered by the board, driven by `firmware/aipi-jarvis/main/arc_light.c`
+(see `docs/AIPI_ARC_REACTOR.md`). The earlier note that its type and current
+draw were unknown is obsolete; no external circuitry is needed.
+
+The controller is still disabled by default, now for a narrower reason: the
+visual states have not been observed on the physical light. Enabling it is an
+owner check, not a hardware unknown.
 
 The controller derives everything from the authoritative terminal state rather
 than keeping its own idea of what the terminal is doing, so the light can never

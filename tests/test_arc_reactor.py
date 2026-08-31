@@ -106,8 +106,38 @@ def test_offline_is_dimmer_than_idle():
     assert offline < idle
 
 
-def test_no_gpio_is_assigned_anywhere_in_the_module():
+def test_the_module_drives_no_gpio():
+    """This Jarvis-side controller computes frames; firmware owns the pin.
+
+    Asserted over the parsed AST rather than the raw text. The previous version
+    searched the source for the string "GPIO" and exempted any file containing
+    the phrase "GPIO is assigned", so accurate prose about the firmware's pin
+    broke it while a comment carrying the magic phrase would have satisfied it
+    even if the module really did drive a pin. Comments and docstrings cannot
+    affect this check in either direction.
+    """
+    import ast
     from pathlib import Path
-    source = Path("src/jarvis_home/devices/arc_reactor.py").read_text()
-    for forbidden in ("GPIO", "gpio", "pin =", "PIN ="):
-        assert forbidden not in source or "GPIO is assigned" in source
+
+    tree = ast.parse(Path("src/jarvis_home/devices/arc_reactor.py").read_text())
+
+    hardware_modules = {"machine", "RPi", "gpiozero", "board", "digitalio",
+                        "pigpio", "periphery", "smbus", "spidev"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] not in hardware_modules, (
+                    f"arc_reactor imports hardware module {alias.name}")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module.split(".")[0] not in hardware_modules, (
+                f"arc_reactor imports from hardware module {node.module}")
+
+    # No executable name may look like a pin assignment. Docstrings and
+    # comments are not Name nodes, so they are structurally excluded.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            assert "gpio" not in node.id.lower(), (
+                f"arc_reactor assigns a GPIO-like name: {node.id}")
+        if isinstance(node, ast.Attribute):
+            assert "gpio" not in node.attr.lower(), (
+                f"arc_reactor touches a GPIO-like attribute: {node.attr}")

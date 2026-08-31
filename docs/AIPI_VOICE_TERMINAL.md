@@ -79,6 +79,9 @@ Camera-triggered greeting and multi-turn visitor sessions are implemented and
 unit-tested but not physically confirmed, because the front-door camera at the
 configured address is not currently reachable on the network.
 
-The arc reactor is software only. No GPIO is assigned and it is disabled by
-default: the light's voltage, current draw, connector, and type are unknown,
-and an ESP32 pin must never source the current a decorative light wants.
+The arc reactor's Jarvis-side controller is software only and touches no GPIO.
+The light itself is identified and implemented: an onboard single-pixel WS2812
+on GPIO46, driven by `firmware/aipi-jarvis/main/arc_light.c`. It is initialised
+but disabled by default because its visual states have not yet been observed on
+the physical device — an owner check, not a hardware unknown. See
+`AIPI_ARC_REACTOR.md`.
